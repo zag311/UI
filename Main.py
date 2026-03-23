@@ -3,50 +3,47 @@ import cv2
 
 from PyQt5.QtCore import (
     Qt, QTimer, QDateTime, QRectF,
-    QPropertyAnimation, QEasingCurve, pyqtProperty, QEvent
+    QPropertyAnimation, QEasingCurve, pyqtProperty
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QFont
 )
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QLabel, QPushButton,
-    QHBoxLayout, QVBoxLayout, QGridLayout, QFrame, QSizePolicy
+    QHBoxLayout, QVBoxLayout, QFrame, QSizePolicy,
+    QGraphicsDropShadowEffect
 )
 
-# PiCamera2
-from picamera2 import Picamera2
+from history import HistoryDialog
 
 
-# ====== PREVIEW SIZE (camera stream size) ======
-PREVIEW_W = 350
-PREVIEW_H = 400
-CAM_FPS_MS = 30  
-
-# ====== AI READ INTERVAL (2 minutes) ======
-AI_READ_INTERVAL_MS = 10_000
+PREVIEW_W = 470
+PREVIEW_H = 570
+CAM_FPS_MS = 30
+AI_READ_INTERVAL_MS = 120_000
 AI_FIRST_READ_DELAY_MS = 600
+POWER_HOLD_MS = 3000
 
 
 class ConfidenceGauge(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
 
-        self._value = 0.0  # 0..100
-        self._segments = 24
-        self._gap_deg = 4.0
-        self._start_deg = 120.0
-        self._span_deg = 300.0
+        self._value = 40.0
+        self._segments = 10
+        self._gap_deg = 2.5
+        self._start_deg = 90.0
+        self._span_deg = 360.0
 
-        self._seg_on = QColor(192, 92, 34)
-        self._seg_off = QColor(238, 222, 205)
-        self._title_color = QColor(155, 125, 105)
-        self._value_color = QColor(140, 105, 85)
+        self._seg_on = QColor("#8a5921")
+        self._seg_off = QColor("#ece8e2")
+        self._value_color = QColor("#6b3d10")
 
         self._anim = QPropertyAnimation(self, b"value", self)
         self._anim.setDuration(500)
         self._anim.setEasingCurve(QEasingCurve.InOutCubic)
 
-        self.setFixedSize(130, 130)
+        self.setFixedSize(230, 230)
 
     def stop_animation(self):
         if self._anim.state() == QPropertyAnimation.Running:
@@ -59,10 +56,10 @@ class ConfidenceGauge(QWidget):
         self._anim.setEndValue(percent)
         self._anim.start()
 
-    def get_value(self) -> float:
+    def get_value(self):
         return float(self._value)
 
-    def set_value(self, v: float):
+    def set_value(self, v):
         self._value = max(0.0, min(100.0, float(v)))
         self.update()
 
@@ -73,12 +70,12 @@ class ConfidenceGauge(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
 
         side = min(self.width(), self.height())
-        pad = int(side * 0.12)
-        ring_th = max(10, int(side * 0.10))
+        pad = 18
+        ring_th = 34
 
         rect = QRectF(
             (self.width() - side) / 2 + pad,
-            (self.height() - side) / 10 + pad,
+            (self.height() - side) / 2 + pad,
             side - 2 * pad,
             side - 2 * pad
         )
@@ -100,39 +97,34 @@ class ConfidenceGauge(QWidget):
             p.setPen(pen_on if i < on_segments else pen_off)
             p.drawArc(rect, int(start * 16), int(-span * 16))
 
-        p.setPen(self._title_color)
-        f1 = QFont("Arial", max(9, int(side * 0.10)))
-        f1.setBold(True)
-        p.setFont(f1)
-        top_rect = QRectF(0, int(side * 0.00), self.width(), int(side * 0.20))
-        p.drawText(top_rect, Qt.AlignHCenter | Qt.AlignTop, "Confidence")
-
         p.setPen(self._value_color)
-        f2 = QFont("Arial", max(14, int(side * 0.15)))
-        f2.setBold(True)
-        p.setFont(f2)
-        val_rect = self.rect().adjusted(0, int(side * 0.06), 0, 0)
-        p.drawText(val_rect, Qt.AlignHCenter | Qt.AlignVCenter, f"{self._value:.1f}%")
+        f = QFont("Arial", 26)
+        f.setBold(True)
+        p.setFont(f)
+        p.drawText(self.rect(), Qt.AlignCenter, f"{int(self._value)}%")
 
 
-class Card(QFrame):
-    def __init__(self, title: str = "", parent=None):
+class SoftPanel(QFrame):
+    def __init__(self, parent=None):
         super().__init__(parent)
-        self.setObjectName("Card")
-        self.setFrameShape(QFrame.NoFrame)
+        self.setObjectName("SoftPanel")
 
-        self.root = QVBoxLayout(self)
-        self.root.setContentsMargins(14, 12, 14, 12)
-        self.root.setSpacing(10)
 
-        if title:
-            t = QLabel(title)
-            t.setObjectName("CardTitle")
-            self.root.addWidget(t)
+class BrownHeader(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("BrownHeader")
+        self.setAlignment(Qt.AlignCenter)
+
+
+class CreamHeader(QLabel):
+    def __init__(self, text="", parent=None):
+        super().__init__(text, parent)
+        self.setObjectName("CreamHeader")
+        self.setAlignment(Qt.AlignCenter)
 
 
 class OverlayPage(QFrame):
-    """Full-screen overlay that hovers above the main UI."""
     def __init__(self, title: str, parent=None):
         super().__init__(parent)
         self.setObjectName("OverlayPage")
@@ -149,8 +141,6 @@ class OverlayPage(QFrame):
         dialogLay.setSpacing(12)
 
         header = QHBoxLayout()
-        header.setSpacing(10)
-
         self.titleLabel = QLabel(title)
         self.titleLabel.setObjectName("OverlayTitle")
 
@@ -185,321 +175,518 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # Kiosk look (no window bar)
         self.setWindowFlags(Qt.FramelessWindowHint)
-        self.setWindowTitle("Copra Quality Analysis System (PiCamera2)")
+        self.setWindowTitle("Copra Quality Analysis System")
 
-        # ===== Press & Hold EXIT (top-right) =====
-        self.exit_corner_size = 120
-        self.exit_hold_ms = 2000
-        self._exit_hold_armed = False
-        self._exit_timer = QTimer(self)
-        self._exit_timer.setSingleShot(True)
-        self._exit_timer.timeout.connect(self.close)
+        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+        if not self.cap.isOpened():
+            self.cap = cv2.VideoCapture(0)
 
-        # Capture press/hold anywhere (even on child widgets)
-        QApplication.instance().installEventFilter(self)
+        if self.cap.isOpened():
+            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, PREVIEW_W)
+            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_H)
 
-        # ===== PiCamera2 =====
-        self.picam2 = Picamera2()
-        config = self.picam2.create_preview_configuration(
-            main={"format": "RGB888", "size": (PREVIEW_W, PREVIEW_H)}
-        )
-        self.picam2.configure(config)
-        self.picam2.start()
-
-        # ===== Preview timer =====
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self.update_frame)
 
         self.is_running = False
         self.last_frame = None
 
-        # ===== AI timer (2 min) =====
         self.ai_timer = QTimer(self)
         self.ai_timer.setInterval(AI_READ_INTERVAL_MS)
         self.ai_timer.timeout.connect(self.do_ai_read)
 
-        # ===== Central =====
+        self.powerHoldTimer = QTimer(self)
+        self.powerHoldTimer.setSingleShot(True)
+        self.powerHoldTimer.timeout.connect(self.close)
+
         central = QWidget()
         self.setCentralWidget(central)
-        outer = QVBoxLayout(central)
-        outer.setContentsMargins(14, 14, 14, 14)
-        outer.setSpacing(12)
 
-        # ===== Top bar =====
-        top = QHBoxLayout()
+        outer = QVBoxLayout(central)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(0)
+
+        headerWrap = QFrame()
+        headerWrap.setObjectName("HeaderWrap")
+        headerLay = QVBoxLayout(headerWrap)
+        headerLay.setContentsMargins(20, 14, 20, 14)
+
         self.titleLabel = QLabel("COPRA QUALITY ANALYSIS SYSTEM")
         self.titleLabel.setObjectName("HeaderTitle")
         self.titleLabel.setAlignment(Qt.AlignCenter)
+        headerLay.addWidget(self.titleLabel)
+        outer.addWidget(headerWrap)
 
-        self.dateLabel = QLabel("")
-        self.dateLabel.setObjectName("HeaderMeta")
-        self.timeLabel = QLabel("")
-        self.timeLabel.setObjectName("HeaderMeta")
+        bodyWrap = QFrame()
+        bodyWrap.setObjectName("BodyWrap")
+        bodyLay = QHBoxLayout(bodyWrap)
+        bodyLay.setContentsMargins(20, 18, 20, 18)
+        bodyLay.setSpacing(16)
 
-        top.addWidget(self.titleLabel, 1)
-        top.addWidget(self.dateLabel, 0, Qt.AlignRight)
-        top.addSpacing(8)
-        top.addWidget(self.timeLabel, 0, Qt.AlignRight)
-        outer.addLayout(top)
+        # LEFT
+        leftPanel = SoftPanel()
+        leftPanel.setMinimumWidth(500)
+        leftLay = QVBoxLayout(leftPanel)
+        leftLay.setContentsMargins(18, 18, 18, 18)
+        leftLay.setSpacing(0)
 
-        # ===== Main content row (3 columns) =====
-        content = QHBoxLayout()
-        content.setSpacing(12)
-
-        # LEFT: Preview
-        leftCard = Card("", self)
         self.previewLabel = QLabel("Tap START to show camera")
         self.previewLabel.setObjectName("Preview")
         self.previewLabel.setAlignment(Qt.AlignCenter)
         self.previewLabel.setFixedSize(PREVIEW_W, PREVIEW_H)
         self.previewLabel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
         self.previewLabel.setScaledContents(False)
-        leftCard.root.addWidget(self.previewLabel, 0, Qt.AlignCenter)
-        leftCard.root.addStretch(1)
+        leftLay.addWidget(self.previewLabel, 0, Qt.AlignCenter)
 
-        # CENTER: Final result
-        centerCard = Card("FINAL RESULT", self)
+        # CENTER - adjusted professionally
+        centerPanel = SoftPanel()
+        centerPanel.setMinimumWidth(400)
+        centerLay = QVBoxLayout(centerPanel)
+        centerLay.setContentsMargins(12, 12, 12, 12)
+        centerLay.setSpacing(6)
 
-        gradeBox = QFrame()
-        gradeBox.setObjectName("GradeBox")
-        gradeLayout = QVBoxLayout(gradeBox)
-        gradeLayout.setContentsMargins(14, 14, 14, 14)
-        gradeLayout.setSpacing(6)
+        analysisHeader = QLabel("AI ANALYSIS RESULT:")
+        analysisHeader.setObjectName("MidTopStrip")
+        analysisHeader.setAlignment(Qt.AlignCenter)
+        analysisHeader.setFixedHeight(40)
+        centerLay.addWidget(analysisHeader)
 
-        self.gradeTitle = QLabel("GRADE")
-        self.gradeTitle.setObjectName("MiniTitle")
-        self.gradeValue = QLabel("Grade 1")
-        self.gradeValue.setObjectName("GradeValue")
-        self.acceptedValue = QLabel("Accepted")
-        self.acceptedValue.setObjectName("AcceptedValue")
+        centerLay.addSpacing(8)
 
-        gradeLayout.addWidget(self.gradeTitle, 0, Qt.AlignHCenter)
-        gradeLayout.addWidget(self.gradeValue, 0, Qt.AlignHCenter)
-        gradeLayout.addWidget(self.acceptedValue, 0, Qt.AlignHCenter)
+        gradeTitle = QLabel("GRADE")
+        gradeTitle.setObjectName("MidGradeTitle")
+        gradeTitle.setAlignment(Qt.AlignCenter)
+        gradeTitle.setFixedHeight(28)
+        centerLay.addWidget(gradeTitle)
 
-        confBox = QFrame()
-        confBox.setObjectName("ConfidenceBox")
-        confLayout = QVBoxLayout(confBox)
-        confLayout.setContentsMargins(14, 14, 14, 14)
-        confLayout.setSpacing(4)
+        centerLay.addSpacing(4)
+
+        gradeWrap = QFrame()
+        gradeWrap.setObjectName("MidGradeWrap")
+        gradeWrapLay = QHBoxLayout(gradeWrap)
+        gradeWrapLay.setContentsMargins(20, 0, 20, 0)
+        gradeWrapLay.setSpacing(0)
+
+        self.gradeValue = QLabel("GRADE 1")
+        self.gradeValue.setObjectName("MidGradeBig")
+        self.gradeValue.setAlignment(Qt.AlignCenter)
+        self.gradeValue.setFixedHeight(56)
+        gradeWrapLay.addWidget(self.gradeValue)
+
+        centerLay.addWidget(gradeWrap)
+
+        centerLay.addSpacing(14)
+
+        confTitle = QLabel("CONFIDENCE LEVEL:")
+        confTitle.setObjectName("MidConfidenceTitle")
+        confTitle.setAlignment(Qt.AlignCenter)
+        confTitle.setFixedHeight(30)
+        centerLay.addWidget(confTitle)
+
+        centerLay.addSpacing(8)
 
         self.confGauge = ConfidenceGauge(self)
-        confLayout.addWidget(self.confGauge, 0, Qt.AlignHCenter)
+        centerLay.addWidget(self.confGauge, 0, Qt.AlignCenter)
 
-        legend = QLabel(
-            "Quality Status\n"
-            "• Grade 1  Excellent\n"
-            "• Grade 2  Good\n"
-            "• Grade 3  Fair\n"
-            "• Reject   Poor"
-        )
-        legend.setObjectName("Legend")
+        centerLay.addSpacing(14)
 
-        centerCard.root.addWidget(gradeBox)
-        centerCard.root.addWidget(confBox)
-        centerCard.root.addWidget(legend)
+        self.colorNote = QLabel("Clean and White to Pale Color")
+        self.colorNote.setObjectName("MidBottomNote")
+        self.colorNote.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
+        self.colorNote.setFixedHeight(54)
+        centerLay.addWidget(self.colorNote)
 
-        # RIGHT: Batch + Sensor + Recommendation
+        # RIGHT
         rightCol = QVBoxLayout()
         rightCol.setSpacing(12)
+        rightCol.setContentsMargins(0, 0, 0, 0)
 
-        batchCards = Card("BATCH COUNT", self)
-        self.batchLabel = QLabel("Batch 1: 56")
-        self.batchLabel.setObjectName("LineItem")
-        batchCards.root.addWidget(self.batchLabel)
+        batchPanel = SoftPanel()
+        batchPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        batchLay = QVBoxLayout(batchPanel)
+        batchLay.setContentsMargins(8, 8, 8, 10)
+        batchLay.setSpacing(8)
 
-        sensorCards = Card("SENSOR READING", self)
-        self.m1 = QLabel("Moisture Content 1: 12.4%")
-        self.m2 = QLabel("Moisture Content 2: 8.4%")
-        for w in (self.m1, self.m2):
-            w.setObjectName("LineItem")
-            sensorCards.root.addWidget(w)
+        batchHead = BrownHeader("BATCH COUNT")
+        batchHead.setFixedHeight(48)
+        batchLay.addWidget(batchHead)
 
-        recoCard = Card("RECOMMENDATION", self)
-        self.cookTime = QLabel("Cooking Time: 45-50 Minutes")
-        self.cookTime.setObjectName("BigPill")
-        self.status = QLabel("Status: Optimal")
-        self.status.setObjectName("LineItem")
-        self.env = QLabel("Temp: 45*C   |   Humidity: 65%")
-        self.env.setObjectName("MutedItem")
-        recoCard.root.addWidget(self.cookTime)
-        recoCard.root.addWidget(self.status)
-        recoCard.root.addWidget(self.env)
+        self.batchLabel = QLabel("BATCH 1: 26 COPRA")
+        self.batchLabel.setObjectName("BatchValueText")
+        self.batchLabel.setAlignment(Qt.AlignCenter)
+        batchLay.addWidget(self.batchLabel)
+        batchLay.addStretch(1)
 
-        rightCol.addWidget(batchCards)
-        rightCol.addWidget(sensorCards)
-        rightCol.addWidget(recoCard)
+        sensorPanel = SoftPanel()
+        sensorPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        sensorLay = QVBoxLayout(sensorPanel)
+        sensorLay.setContentsMargins(8, 8, 8, 8)
+        sensorLay.setSpacing(8)
 
+        sensorHead = CreamHeader("SENSOR READING")
+        sensorHead.setFixedHeight(48)
+        sensorLay.addWidget(sensorHead)
 
-        content.addWidget(leftCard, 3)
-        content.addWidget(centerCard, 2)
-        content.addLayout(rightCol, 2)
-        outer.addLayout(content, 1)
+        self.copraStatus = QLabel("COPRA STATUS: WET")
+        self.copraStatus.setObjectName("SensorStatusText")
+        self.copraStatus.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        sensorLay.addWidget(self.copraStatus)
 
-        # ===== Bottom bar =====
-        bottom = QFrame()
-        bottom.setObjectName("BottomBar")
-        bottomLayout = QGridLayout(bottom)
-        bottomLayout.setContentsMargins(10, 10, 10, 10)
-        bottomLayout.setHorizontalSpacing(10)
-        bottomLayout.setVerticalSpacing(0)
+        moistureBox = QFrame()
+        moistureBox.setObjectName("MoistureBox")
+        moistureLay = QHBoxLayout(moistureBox)
+        moistureLay.setContentsMargins(16, 8, 16, 8)
+        moistureLay.setSpacing(8)
 
-        self.historyBtn = QPushButton(" HISTORY")
-        self.historyBtn.setObjectName("NavBtn")
+        self.moistureLabelTitle = QLabel("MOISTURE LEVEL:")
+        self.moistureLabelTitle.setObjectName("MoistureTitle")
+
+        self.moistureValue = QLabel("12%")
+        self.moistureValue.setObjectName("MoistureValue")
+        self.moistureValue.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+
+        moistureLay.addWidget(self.moistureLabelTitle, 1)
+        moistureLay.addWidget(self.moistureValue, 0)
+
+        sensorLay.addWidget(moistureBox)
+        sensorLay.addStretch(1)
+
+        recoPanel = SoftPanel()
+        recoPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
+        recoLay = QVBoxLayout(recoPanel)
+        recoLay.setContentsMargins(8, 8, 8, 10)
+        recoLay.setSpacing(8)
+
+        recoHead = BrownHeader("RECOMMENDATION")
+        recoHead.setFixedHeight(48)
+        recoLay.addWidget(recoHead)
+
+        self.recommendation = QLabel("✔ PASSED: READY TO SELL")
+        self.recommendation.setObjectName("RecoValueText")
+        self.recommendation.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
+        recoLay.addWidget(self.recommendation)
+        recoLay.addStretch(1)
+
+        rightCol.addWidget(batchPanel, 2)
+        rightCol.addWidget(sensorPanel, 4)
+        rightCol.addWidget(recoPanel, 2)
+
+        bodyLay.addWidget(leftPanel, 5)
+        bodyLay.addWidget(centerPanel, 4)
+        bodyLay.addLayout(rightCol, 5)
+        outer.addWidget(bodyWrap, 1)
+
+        bottomWrap = QFrame()
+        bottomWrap.setObjectName("BottomWrap")
+        bottomLay = QHBoxLayout(bottomWrap)
+        bottomLay.setContentsMargins(12, 12, 12, 14)
+        bottomLay.setSpacing(16)
+
+        self.historyBtn = QPushButton("HISTORY")
+        self.historyBtn.setObjectName("FooterLightBtn")
+        self.historyBtn.setMinimumHeight(74)
 
         self.mainBtn = QPushButton("START")
-        self.mainBtn.setObjectName("PrimaryBtn")
-        self.mainBtn.setMinimumHeight(60)
+        self.mainBtn.setObjectName("FooterMainBtn")
+        self.mainBtn.setMinimumHeight(84)
 
-        self.reportBtn = QPushButton(" REPORT")
-        self.reportBtn.setObjectName("NavBtn")
+        self.reportBtn = QPushButton("RECEIPT")
+        self.reportBtn.setObjectName("FooterLightBtn")
+        self.reportBtn.setMinimumHeight(74)
 
-        bottomLayout.addWidget(self.historyBtn, 0, 0)
-        bottomLayout.addWidget(self.mainBtn, 0, 1)
-        bottomLayout.addWidget(self.reportBtn, 0, 2)
+        self.powerBtn = QPushButton("⏻")
+        self.powerBtn.setObjectName("PowerBtn")
+        self.powerBtn.setFixedSize(74, 74)
+        self.powerBtn.setCheckable(True)
 
-        bottomLayout.setColumnStretch(0, 1)
-        bottomLayout.setColumnStretch(1, 2)
-        bottomLayout.setColumnStretch(2, 1)
+        bottomLay.addWidget(self.historyBtn, 3)
+        bottomLay.addWidget(self.mainBtn, 5)
+        bottomLay.addWidget(self.reportBtn, 3)
+        bottomLay.addWidget(self.powerBtn, 0)
+        outer.addWidget(bottomWrap)
 
-        outer.addWidget(bottom, 0)
+        self.reportOverlay = OverlayPage("  RECEIPT", central)
+        self.reportOverlay.body.setText(
+            "• Generate receipt here\n"
+            "• Export PDF\n"
+            "• Print summary per batch"
+        )
+        self.reportOverlay.closeBtn.clicked.connect(self.reportOverlay.hide_overlay)
 
-        # ===== Signals =====
         self.mainBtn.clicked.connect(self.toggle_system)
+        self.historyBtn.clicked.connect(self.open_history)
+        self.reportBtn.clicked.connect(self.open_report)
 
-        # Clock updater
+        self.powerBtn.pressed.connect(self.start_power_hold)
+        self.powerBtn.released.connect(self.cancel_power_hold)
+
         self.clock = QTimer(self)
         self.clock.timeout.connect(self.update_datetime)
         self.clock.start(500)
         self.update_datetime()
 
         self.apply_styles()
-
-        # ===== Overlays (History / Report) =====
-        self.historyOverlay = OverlayPage("  HISTORY", central)
-        self.historyOverlay.body.setText(
-            "• Show past batches here\n"
-            "• Example: Date, Grade, Confidence, Moisture values\n"
-            "• You can later replace this with a table/list"
-        )
-        self.reportOverlay = OverlayPage("  REPORT", central)
-        self.reportOverlay.body.setText(
-            "• Generate/preview reports here\n"
-            "• Example: Export PDF, print, summary per batch"
-        )
-
-        self.historyOverlay.closeBtn.clicked.connect(self.historyOverlay.hide_overlay)
-        self.reportOverlay.closeBtn.clicked.connect(self.reportOverlay.hide_overlay)
-
-        self.historyBtn.clicked.connect(self.open_history)
-        self.reportBtn.clicked.connect(self.open_report)
-
+        self.add_shadows()
         self._resize_overlays()
 
-    # ===== Press & Hold Exit via eventFilter =====
-    def eventFilter(self, obj, event):
-        if event.type() == QEvent.MouseButtonPress:
-            gp = event.globalPos()
-            p = self.mapFromGlobal(gp)
+        if not self.cap.isOpened():
+            self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+            self.previewLabel.setAlignment(Qt.AlignCenter)
 
-            if p.x() > self.width() - self.exit_corner_size and p.y() < self.exit_corner_size:
-                self._exit_hold_armed = True
-                self._exit_timer.start(self.exit_hold_ms)
+    def mouseDoubleClickEvent(self, event):
+        corner_size = 120
+        if event.pos().x() > self.width() - corner_size and event.pos().y() < corner_size:
+            self.close()
 
-        # Cancel hold on release (anywhere)
-        elif event.type() == QEvent.MouseButtonRelease:
-            if self._exit_hold_armed:
-                self._exit_timer.stop()
-                self._exit_hold_armed = False
+    def start_power_hold(self):
+        self.powerBtn.setText("...")
+        self.powerHoldTimer.start(POWER_HOLD_MS)
 
-        return super().eventFilter(obj, event)
+    def cancel_power_hold(self):
+        if self.powerHoldTimer.isActive():
+            self.powerHoldTimer.stop()
+        self.powerBtn.setChecked(False)
+        self.powerBtn.setText("⏻")
+
+    def add_shadows(self):
+        panels = self.findChildren(QFrame, "SoftPanel")
+        for panel in panels:
+            shadow = QGraphicsDropShadowEffect(self)
+            shadow.setBlurRadius(18)
+            shadow.setOffset(0, 3)
+            shadow.setColor(QColor(90, 60, 20, 25))
+            panel.setGraphicsEffect(shadow)
 
     def apply_styles(self):
         self.setStyleSheet("""
-            QWidget { background: #f6f1ea; color:#4b2f1e; font-family: Arial; }
-            #HeaderTitle { font-size: 22px; font-weight: 800; letter-spacing: 1px; }
-            #HeaderMeta { font-size: 14px; padding: 6px 10px; background:#efe5db; border-radius: 8px; }
-
-            #Card {
-                background:#ffffff;
-                border: 1px solid #e5d7ca;
-                border-radius: 16px;
+            QWidget {
+                background: #f3eee7;
+                color: #4f2a08;
+                font-family: Arial;
             }
-            #CardTitle {
-                font-size: 14px;
-                font-weight: 800;
-                color:#6a3b20;
+
+            #HeaderWrap {
+                background: #f6f1ea;
+                border: none;
+            }
+
+            #HeaderTitle {
+                font-size: 34px;
+                font-weight: 900;
+                color: #5a2d03;
                 letter-spacing: 1px;
+                padding: 8px 0;
+            }
+
+            #BodyWrap {
+                background: #efe8e0;
+            }
+
+            #SoftPanel {
+                background: #f8f8f8;
+                border: none;
+                border-radius: 22px;
             }
 
             #Preview {
-                background:#f2ece6;
-                border: 2px solid #d9c7b6;
-                border-radius: 14px;
+                background: #e5d0c0;
+                border: 3px solid #3f3f3f;
+                border-radius: 0px;
+                color: #6b3d10;
+                font-size: 22px;
+                font-weight: 700;
             }
 
-            #GradeBox, #ConfidenceBox {
-                background:#fbf7f2;
-                border: 1px solid #eadbce;
-                border-radius: 14px;
-            }
-            #MiniTitle { font-size: 12px; font-weight: 800; color:#7a4b2a; }
-            #GradeValue { font-size: 30px; font-weight: 900; color:#ffffff; background:#8a4c2a; padding: 10px 18px; border-radius: 12px; }
-            #AcceptedValue { font-size: 16px; font-weight: 900; color:#2e6b3a; }
-
-            #Legend { font-size: 12px; color:#7a4b2a; padding: 4px; }
-
-            #LineItem { font-size: 15px; padding: 6px 2px; }
-            #MutedItem { font-size: 13px; color:#8b7766; padding-top: 6px; }
-
-            #BigPill {
-                font-size: 18px; font-weight: 900;
-                color:#ffffff;
-                background:#8a4c2a;
-                padding: 10px 14px;
-                border-radius: 14px;
+            /* MIDDLE PANEL */
+            #MidTopStrip {
+                background: #dddddd;
+                color: #6b3d10;
+                border-radius: 8px;
+                font-size: 18px;
+                font-weight: 900;
+                padding: 0 10px;
             }
 
-            QPushButton {
-                border-radius: 12px;
-                padding: 12px;
+            #MidGradeTitle {
+                background: transparent;
+                color: #6b3d10;
+                font-size: 15px;
+                font-weight: 900;
+                padding: 0;
+            }
+
+            #MidGradeWrap {
+                background: transparent;
+                border: none;
+            }
+
+            #MidGradeBig {
+                background: #8a5921;
+                color: white;
+                border-radius: 10px;
+                font-size: 32px;
+                font-weight: 900;
+                padding: 0 12px;
+            }
+
+            #MidConfidenceTitle {
+                background: transparent;
+                color: #6b3d10;
+                font-size: 15px;
+                font-weight: 900;
+                padding: 0;
+            }
+
+            #MidBottomNote {
+                background: #f1ece5;
+                color: #4f2a08;
+                border-radius: 10px;
                 font-size: 14px;
-                font-weight: 800;
+                font-weight: 900;
+                padding-left: 14px;
+                padding-right: 14px;
             }
-            #PrimaryBtn { background:#8a4c2a; color:#fff; border:none; }
-            #PrimaryBtn:pressed { background:#6f3b20; }
 
-            #DangerBtn { background:#c14b3d; color:#fff; border:none; }
-            #DangerBtn:pressed { background:#9f3b30; }
+            /* RIGHT PANEL */
+            #BrownHeader {
+                background: #7b4d21;
+                color: white;
+                border-radius: 10px;
+                font-size: 23px;
+                font-weight: 900;
+                padding: 6px 8px;
+            }
 
-            #NavBtn { background:#efe5db; color:#6a3b20; border:none; }
-            #NavBtn:pressed { background:#e4d5c6; }
+            #CreamHeader {
+                background: #efe1c8;
+                color: #5a2d03;
+                border-radius: 10px;
+                font-size: 23px;
+                font-weight: 900;
+                padding: 6px 8px;
+            }
 
-            #BottomBar {
-                background:#ffffff;
-                border: 1px solid #e5d7ca;
-                border-radius: 16px;
+            #BatchValueText {
+                color: #4f2a08;
+                font-size: 21px;
+                font-weight: 900;
+                padding: 2px 6px 4px 6px;
+            }
+
+            #SensorStatusText {
+                background: #ece7e7;
+                color: #4f2a08;
+                border-radius: 8px;
+                font-size: 17px;
+                font-weight: 900;
+                padding: 10px 14px;
+            }
+
+            #MoistureBox {
+                background: #ece7e7;
+                border-radius: 8px;
+            }
+
+            #MoistureTitle {
+                color: #4f2a08;
+                font-size: 18px;
+                font-weight: 900;
+            }
+
+            #MoistureValue {
+                color: #7b4d21;
+                font-size: 54px;
+                font-weight: 900;
+            }
+
+            #RecoValueText {
+                color: #4f2a08;
+                font-size: 19px;
+                font-weight: 900;
+                padding: 4px 6px 2px 6px;
+            }
+
+            #BottomWrap {
+                background: white;
+                border: none;
+            }
+
+            #FooterLightBtn {
+                background: #efe1c8;
+                color: #6b3d10;
+                border: none;
+                border-radius: 14px;
+                font-size: 28px;
+                font-weight: 900;
+            }
+
+            #FooterLightBtn:pressed {
+                background: #e1d0b5;
+            }
+
+            #FooterMainBtn {
+                background: #7b4d21;
+                color: white;
+                border: none;
+                border-radius: 14px;
+                font-size: 42px;
+                font-weight: 900;
+            }
+
+            #FooterMainBtn:pressed {
+                background: #613a15;
+            }
+
+            #DangerBtn {
+                background: #a23425;
+                color: white;
+                border: none;
+                border-radius: 14px;
+                font-size: 42px;
+                font-weight: 900;
+            }
+
+            #DangerBtn:pressed {
+                background: #82271b;
+            }
+
+            #PowerBtn {
+                background: #8b5a21;
+                color: white;
+                border: none;
+                border-radius: 37px;
+                font-size: 38px;
+                font-weight: 900;
+            }
+
+            #PowerBtn:pressed {
+                background: #6d4518;
+            }
+
+            #PowerBtn:checked {
+                background: #6d4518;
             }
 
             #OverlayPage {
                 background: rgba(0, 0, 0, 110);
             }
+
             #OverlayDialog {
-                background: #ffffff;
+                background: white;
                 border: 1px solid #e5d7ca;
                 border-radius: 18px;
                 min-width: 520px;
                 max-width: 900px;
                 min-height: 380px;
             }
+
             #OverlayTitle {
                 font-size: 18px;
                 font-weight: 900;
                 color: #6a3b20;
-                letter-spacing: 1px;
             }
+
             #OverlayClose {
                 background: #efe5db;
                 border: none;
@@ -508,7 +695,11 @@ class MainWindow(QMainWindow):
                 font-weight: 900;
                 color: #6a3b20;
             }
-            #OverlayClose:pressed { background:#e4d5c6; }
+
+            #OverlayClose:pressed {
+                background: #e4d5c6;
+            }
+
             #OverlayBody {
                 font-size: 14px;
                 color: #4b2f1e;
@@ -518,9 +709,7 @@ class MainWindow(QMainWindow):
     def _resize_overlays(self):
         c = self.centralWidget()
         if c:
-            r = c.rect()
-            self.historyOverlay.setGeometry(r)
-            self.reportOverlay.setGeometry(r)
+            self.reportOverlay.setGeometry(c.rect())
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -528,16 +717,16 @@ class MainWindow(QMainWindow):
 
     def open_history(self):
         self.reportOverlay.hide_overlay()
-        self.historyOverlay.show_overlay()
+        dialog = HistoryDialog(self)
+        dialog.exec_()
 
     def open_report(self):
-        self.historyOverlay.hide_overlay()
         self.reportOverlay.show_overlay()
 
     def update_datetime(self):
         now = QDateTime.currentDateTime()
-        self.dateLabel.setText(now.toString("yyyy-MM-dd"))
-        self.timeLabel.setText(now.toString("hh:mm:ss AP"))
+        self.current_date = now.toString("yyyy-MM-dd")
+        self.current_time = now.toString("hh:mm:ss AP")
 
     def toggle_system(self):
         if not self.is_running:
@@ -546,7 +735,11 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("DangerBtn")
             self._repolish(self.mainBtn)
 
-            self.preview_timer.start(CAM_FPS_MS)
+            if self.cap.isOpened():
+                self.preview_timer.start(CAM_FPS_MS)
+            else:
+                self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+                self.previewLabel.setAlignment(Qt.AlignCenter)
 
             self.ai_timer.stop()
             QTimer.singleShot(AI_FIRST_READ_DELAY_MS, self.do_ai_read)
@@ -555,7 +748,7 @@ class MainWindow(QMainWindow):
         else:
             self.is_running = False
             self.mainBtn.setText("START")
-            self.mainBtn.setObjectName("PrimaryBtn")
+            self.mainBtn.setObjectName("FooterMainBtn")
             self._repolish(self.mainBtn)
 
             self.preview_timer.stop()
@@ -571,9 +764,36 @@ class MainWindow(QMainWindow):
     def do_ai_read(self):
         if not self.is_running:
             return
+
         import random
-        confidence = random.uniform(60.0, 94.9)
+
+        confidence = random.uniform(35.0, 95.0)
+        moisture = random.randint(10, 18)
+
         self.confGauge.set_target(confidence)
+        self.moistureValue.setText(f"{moisture}%")
+
+        if confidence >= 85:
+            self.gradeValue.setText("GRADE 1")
+            self.colorNote.setText("Clean and White to Pale Color")
+            self.recommendation.setText("✔ PASSED: READY TO SELL")
+        elif confidence >= 70:
+            self.gradeValue.setText("GRADE 2")
+            self.colorNote.setText("Good Color and Acceptable Quality")
+            self.recommendation.setText("✔ PASSED: GOOD FOR MARKET")
+        elif confidence >= 50:
+            self.gradeValue.setText("GRADE 3")
+            self.colorNote.setText("Needs Further Drying / Sorting")
+            self.recommendation.setText("⚠ NEEDS FURTHER PROCESS")
+        else:
+            self.gradeValue.setText("REJECT")
+            self.colorNote.setText("Poor Quality and High Moisture")
+            self.recommendation.setText("✖ REJECTED: NOT READY")
+
+        if moisture >= 14:
+            self.copraStatus.setText("COPRA STATUS: WET")
+        else:
+            self.copraStatus.setText("COPRA STATUS: DRY")
 
     def _repolish(self, widget):
         widget.style().unpolish(widget)
@@ -582,6 +802,7 @@ class MainWindow(QMainWindow):
     def _set_preview_from_bgr(self, frame_bgr):
         if frame_bgr is None:
             return
+
         frame_bgr = cv2.resize(frame_bgr, (PREVIEW_W, PREVIEW_H), interpolation=cv2.INTER_AREA)
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = frame_rgb.shape
@@ -591,18 +812,19 @@ class MainWindow(QMainWindow):
         self.previewLabel.setAlignment(Qt.AlignCenter)
 
     def update_frame(self):
-        if not self.is_running:
+        if not self.cap.isOpened():
             return
-
-        # Picamera2 returns RGB array
-        frame_rgb = self.picam2.capture_array()
-        # Keep your pipeline expecting BGR:
-        frame_bgr = cv2.cvtColor(frame_rgb, cv2.COLOR_RGB2BGR)
-
-        self.last_frame = frame_bgr
-        self._set_preview_from_bgr(frame_bgr)
+        ret, frame = self.cap.read()
+        if not ret:
+            return
+        self.last_frame = frame
+        self._set_preview_from_bgr(frame)
 
     def closeEvent(self, event):
+        try:
+            self.powerHoldTimer.stop()
+        except Exception:
+            pass
         try:
             self.preview_timer.stop()
         except Exception:
@@ -616,8 +838,8 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            if hasattr(self, "picam2") and self.picam2 is not None:
-                self.picam2.stop()
+            if self.cap is not None:
+                self.cap.release()
         except Exception:
             pass
         super().closeEvent(event)
