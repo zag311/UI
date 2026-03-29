@@ -15,6 +15,7 @@ from PyQt5.QtWidgets import (
 )
 
 from history import HistoryDialog
+from report import ReportDialog
 
 
 PREVIEW_W = 470
@@ -124,53 +125,6 @@ class CreamHeader(QLabel):
         self.setAlignment(Qt.AlignCenter)
 
 
-class OverlayPage(QFrame):
-    def __init__(self, title: str, parent=None):
-        super().__init__(parent)
-        self.setObjectName("OverlayPage")
-        self.setVisible(False)
-
-        root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
-
-        self.dialog = QFrame(self)
-        self.dialog.setObjectName("OverlayDialog")
-        dialogLay = QVBoxLayout(self.dialog)
-        dialogLay.setContentsMargins(18, 16, 18, 16)
-        dialogLay.setSpacing(12)
-
-        header = QHBoxLayout()
-        self.titleLabel = QLabel(title)
-        self.titleLabel.setObjectName("OverlayTitle")
-
-        self.closeBtn = QPushButton("✕")
-        self.closeBtn.setObjectName("OverlayClose")
-        self.closeBtn.setFixedSize(38, 38)
-
-        header.addWidget(self.titleLabel, 1)
-        header.addWidget(self.closeBtn, 0, Qt.AlignRight)
-
-        self.body = QLabel("Content goes here…")
-        self.body.setObjectName("OverlayBody")
-        self.body.setAlignment(Qt.AlignTop | Qt.AlignLeft)
-        self.body.setWordWrap(True)
-
-        dialogLay.addLayout(header)
-        dialogLay.addWidget(self.body, 1)
-
-        root.addStretch(1)
-        root.addWidget(self.dialog, 0, Qt.AlignHCenter)
-        root.addStretch(1)
-
-    def show_overlay(self):
-        self.setVisible(True)
-        self.raise_()
-
-    def hide_overlay(self):
-        self.setVisible(False)
-
-
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -239,7 +193,7 @@ class MainWindow(QMainWindow):
         self.previewLabel.setScaledContents(False)
         leftLay.addWidget(self.previewLabel, 0, Qt.AlignCenter)
 
-        # CENTER - adjusted professionally
+        # CENTER
         centerPanel = SoftPanel()
         centerPanel.setMinimumWidth(400)
         centerLay = QVBoxLayout(centerPanel)
@@ -406,13 +360,7 @@ class MainWindow(QMainWindow):
         bottomLay.addWidget(self.powerBtn, 0)
         outer.addWidget(bottomWrap)
 
-        self.reportOverlay = OverlayPage("  RECEIPT", central)
-        self.reportOverlay.body.setText(
-            "• Generate receipt here\n"
-            "• Export PDF\n"
-            "• Print summary per batch"
-        )
-        self.reportOverlay.closeBtn.clicked.connect(self.reportOverlay.hide_overlay)
+        self.reportDialog = ReportDialog(self)
 
         self.mainBtn.clicked.connect(self.toggle_system)
         self.historyBtn.clicked.connect(self.open_history)
@@ -428,7 +376,6 @@ class MainWindow(QMainWindow):
 
         self.apply_styles()
         self.add_shadows()
-        self._resize_overlays()
 
         if not self.cap.isOpened():
             self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
@@ -498,7 +445,6 @@ class MainWindow(QMainWindow):
                 font-weight: 700;
             }
 
-            /* MIDDLE PANEL */
             #MidTopStrip {
                 background: #dddddd;
                 color: #6b3d10;
@@ -548,7 +494,6 @@ class MainWindow(QMainWindow):
                 padding-right: 14px;
             }
 
-            /* RIGHT PANEL */
             #BrownHeader {
                 background: #7b4d21;
                 color: white;
@@ -667,61 +612,14 @@ class MainWindow(QMainWindow):
             #PowerBtn:checked {
                 background: #6d4518;
             }
-
-            #OverlayPage {
-                background: rgba(0, 0, 0, 110);
-            }
-
-            #OverlayDialog {
-                background: white;
-                border: 1px solid #e5d7ca;
-                border-radius: 18px;
-                min-width: 520px;
-                max-width: 900px;
-                min-height: 380px;
-            }
-
-            #OverlayTitle {
-                font-size: 18px;
-                font-weight: 900;
-                color: #6a3b20;
-            }
-
-            #OverlayClose {
-                background: #efe5db;
-                border: none;
-                border-radius: 10px;
-                font-size: 16px;
-                font-weight: 900;
-                color: #6a3b20;
-            }
-
-            #OverlayClose:pressed {
-                background: #e4d5c6;
-            }
-
-            #OverlayBody {
-                font-size: 14px;
-                color: #4b2f1e;
-            }
         """)
 
-    def _resize_overlays(self):
-        c = self.centralWidget()
-        if c:
-            self.reportOverlay.setGeometry(c.rect())
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._resize_overlays()
-
     def open_history(self):
-        self.reportOverlay.hide_overlay()
         dialog = HistoryDialog(self)
         dialog.exec_()
 
     def open_report(self):
-        self.reportOverlay.show_overlay()
+        self.reportDialog.exec_()
 
     def update_datetime(self):
         now = QDateTime.currentDateTime()
