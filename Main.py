@@ -1,9 +1,18 @@
 import sys
+import os
 import cv2
+import tensorflow as tf
+import numpy as np
+import serial
+import re
+import create_tables
+from datetime import datetime
+from statistics import mode, StatisticsError
 
 from PyQt5.QtCore import (
     Qt, QTimer, QDateTime, QRectF,
-    QPropertyAnimation, QEasingCurve, pyqtProperty
+    QPropertyAnimation, QEasingCurve, pyqtProperty, 
+    QThread, pyqtSignal
 )
 from PyQt5.QtGui import (
     QPixmap, QImage, QPainter, QPen, QColor, QFont
@@ -17,19 +26,92 @@ from PyQt5.QtWidgets import (
 from history import HistoryDialog
 from report import ReportDialog
 
-
-PREVIEW_W = 470
-PREVIEW_H = 570
+# ===== Constants (Scaled down) =====
+MODEL_PATH = "/home/aldenrecharge/Desktop/Copra_AI/Copra_Test_UpdateV2.tflite"
+CLASS_NAMES = ['G1', 'G2', 'G3', 'REJ']
+IMAGE_SIZE = (224, 224)
+PREVIEW_W = 360
+PREVIEW_H = 450
 CAM_FPS_MS = 30
-AI_READ_INTERVAL_MS = 120_000
+AI_READ_INTERVAL_MS = 1_000
 AI_FIRST_READ_DELAY_MS = 600
-POWER_HOLD_MS = 3000
+POWER_HOLD_MS = 1000
+NORMALIZED_RANK = {
+    "GRADE 1": 1,
+    "G1": 1,
+    "GRADE 2": 2,
+    "G2": 2,
+    "GRADE 3": 3,
+    "G3": 3,
+    "REJECT": 4,
+    "REJ": 4
+}
 
+def get_worst_grade(grade1, grade2):
+    """
+    Returns the "worst" grade (highest rank) between two grades,
+    regardless of whether it's AI or moisture.
+    """
+    rank1 = NORMALIZED_RANK.get(grade1, 0)
+    rank2 = NORMALIZED_RANK.get(grade2, 0)
+    
+    # Return the one with higher numeric rank (worse)
+    return grade1 if rank1 >= rank2 else grade2
 
+class CameraThread(QThread):
+    frame_ready = pyqtSignal(object)
+    camera_failed = pyqtSignal()
+    
+
+    def __init__(self, cam_index=0, width=400, height=680, fps=20):
+        super().__init__()
+        self.cam_index = cam_index
+        self.width = width
+        self.height = height
+        self.fps = fps
+        self.running = False
+
+    def run(self):
+        cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
+
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+        cap.set(cv2.CAP_PROP_FPS, self.fps)
+        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+
+        # 🔴 VERY IMPORTANT: reduce buffer
+        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+
+        # if not cap.isOpened():
+        #     print("Camera failed to open")
+        #     return
+
+        self.running = True
+
+        while self.running:
+            ret, frame = cap.read()
+
+            if not ret or frame is None:
+                # skip corrupted frame
+                self.msleep(10)
+                continue
+
+            # emit only good frames
+            self.frame_ready.emit(frame)
+
+            # 🔴 throttle to avoid MJPG corruption
+            self.msleep(30)  # ~30ms ≈ 30 FPS safe pacing
+
+        cap.release()
+
+    def stop(self):
+        self.running = False
+        self.wait()
+
+# ===== Confidence Gauge =====
 class ConfidenceGauge(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
-
         self._value = 40.0
         self._segments = 10
         self._gap_deg = 2.5
@@ -44,7 +126,8 @@ class ConfidenceGauge(QWidget):
         self._anim.setDuration(500)
         self._anim.setEasingCurve(QEasingCurve.InOutCubic)
 
-        self.setFixedSize(230, 230)
+        self.setMinimumSize(120, 120)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     def stop_animation(self):
         if self._anim.state() == QPropertyAnimation.Running:
@@ -71,8 +154,8 @@ class ConfidenceGauge(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
 
         side = min(self.width(), self.height())
-        pad = 18
-        ring_th = 34
+        pad = 12
+        ring_th = 26
 
         rect = QRectF(
             (self.width() - side) / 2 + pad,
@@ -99,17 +182,16 @@ class ConfidenceGauge(QWidget):
             p.drawArc(rect, int(start * 16), int(-span * 16))
 
         p.setPen(self._value_color)
-        f = QFont("Arial", 26)
+        f = QFont("Arial", 20)
         f.setBold(True)
         p.setFont(f)
         p.drawText(self.rect(), Qt.AlignCenter, f"{int(self._value)}%")
 
-
+# ===== Panels =====
 class SoftPanel(QFrame):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setObjectName("SoftPanel")
-
 
 class BrownHeader(QLabel):
     def __init__(self, text="", parent=None):
@@ -117,32 +199,103 @@ class BrownHeader(QLabel):
         self.setObjectName("BrownHeader")
         self.setAlignment(Qt.AlignCenter)
 
-
 class CreamHeader(QLabel):
     def __init__(self, text="", parent=None):
         super().__init__(text, parent)
         self.setObjectName("CreamHeader")
         self.setAlignment(Qt.AlignCenter)
 
+# ===== AI Thread =====
+class AIWorker(QThread):
+    result_ready = pyqtSignal(str, float)
 
+    def __init__(self, frame, interpreter, input_details, output_details):
+        super().__init__()
+        self.frame = frame.copy()
+        self.interpreter = interpreter
+        self.input_details = input_details
+        self.output_details = output_details
+
+    def run(self):
+        frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(frame_rgb, IMAGE_SIZE)
+        img_array = resized.astype(np.float32)
+        img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
+        img_array = np.expand_dims(img_array, axis=0)
+
+        self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
+        self.interpreter.invoke()
+        output = self.interpreter.get_tensor(self.output_details[0]['index'])
+
+        idx = int(np.argmax(output))
+        confidence = float(output[0][idx])
+        label = CLASS_NAMES[idx]
+        self.result_ready.emit(label, confidence)
+
+# ===== Main Window =====
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
+        create_tables.init_db()
+
+
+
+        self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
+        self.camera_thread.frame_ready.connect(self.update_preview)
+        self.camera_thread.start()
+        self.camera_thread.camera_failed.connect(self.on_camera_failed)
+        self.moisture_samples = []
+        self.arduino_grades = []  # new list to track grades
+
+        # Start a batch when app starts
+        self.current_batch_id, self.image_folder, self.receipt_folder = create_tables.start_new_batch(operator_id=1)
+        
+        # Moisture Capture
+        self.auto_capture_enabled = True
+        self.is_paused_for_measurement = False
+
+        self.moisture_done = False
+
+        self.moisture_threshold = 8.0  # adjust based on your calibration
+        self.moisture_samples = []
+        self.required_samples = 5
+
+        self.current_moisture = None
+        self.awaiting_stable_reading = False
+
+        # Load AI model
+        self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+        self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
+
+        self.ai_thread_running = False
+        self.last_label = None
+        self.stable_counter = 0
+        self.STABLE_REQUIRED = 3
+        self.MIN_CONFIDENCE = 0.80
+        self.capture_cooldown = False
+
+        # Serial
+        self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+        self.serial_timer = QTimer(self)
+        self.serial_timer.timeout.connect(self.read_serial)
+        self.serial_timer.start(200)
+
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setWindowTitle("Copra Quality Analysis System")
 
-        self.cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
-        if not self.cap.isOpened():
-            self.cap = cv2.VideoCapture(0)
+        # Camera
+        # self.cam_index = 0
+        # self.cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
+        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 400)
+        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
+        # self.cap.set(cv2.CAP_PROP_FPS, 30)
+        # self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-        if self.cap.isOpened():
-            self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, PREVIEW_W)
-            self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, PREVIEW_H)
-
-        self.preview_timer = QTimer(self)
-        self.preview_timer.timeout.connect(self.update_frame)
-
+        # self.preview_timer = QTimer(self)
+        # self.preview_timer.timeout.connect(self.update_preview)
         self.is_running = False
         self.last_frame = None
 
@@ -154,134 +307,125 @@ class MainWindow(QMainWindow):
         self.powerHoldTimer.setSingleShot(True)
         self.powerHoldTimer.timeout.connect(self.close)
 
+        # ===== Layout =====
         central = QWidget()
         self.setCentralWidget(central)
-
         outer = QVBoxLayout(central)
-        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setContentsMargins(0,0,0,0)
         outer.setSpacing(0)
 
+        # Header
         headerWrap = QFrame()
         headerWrap.setObjectName("HeaderWrap")
         headerLay = QVBoxLayout(headerWrap)
-        headerLay.setContentsMargins(20, 14, 20, 14)
-
+        headerLay.setContentsMargins(16,10,16,10)
         self.titleLabel = QLabel("COPRA QUALITY ANALYSIS SYSTEM")
         self.titleLabel.setObjectName("HeaderTitle")
         self.titleLabel.setAlignment(Qt.AlignCenter)
         headerLay.addWidget(self.titleLabel)
         outer.addWidget(headerWrap)
 
+        # Body
         bodyWrap = QFrame()
         bodyWrap.setObjectName("BodyWrap")
         bodyLay = QHBoxLayout(bodyWrap)
-        bodyLay.setContentsMargins(20, 18, 20, 18)
-        bodyLay.setSpacing(16)
+        bodyLay.setContentsMargins(16,14,16,14)
+        bodyLay.setSpacing(10)
 
-        # LEFT
+        # LEFT Panel
         leftPanel = SoftPanel()
-        leftPanel.setMinimumWidth(500)
+        leftPanel.setMinimumWidth(280)
         leftLay = QVBoxLayout(leftPanel)
-        leftLay.setContentsMargins(18, 18, 18, 18)
-        leftLay.setSpacing(0)
+        leftLay.setContentsMargins(12,12,12,12)
+        leftLay.setSpacing(2)
 
         self.previewLabel = QLabel("Tap START to show camera")
         self.previewLabel.setObjectName("Preview")
         self.previewLabel.setAlignment(Qt.AlignCenter)
-        self.previewLabel.setFixedSize(PREVIEW_W, PREVIEW_H)
-        self.previewLabel.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
-        self.previewLabel.setScaledContents(False)
+        self.previewLabel.setMinimumSize(280, 200)
         leftLay.addWidget(self.previewLabel, 0, Qt.AlignCenter)
+        # if not self.cap.isOpened():
+        #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+        #     self.previewLabel.setAlignment(Qt.AlignCenter)
 
-        # CENTER
+        # CENTER Panel
         centerPanel = SoftPanel()
-        centerPanel.setMinimumWidth(400)
+        centerPanel.setMinimumWidth(220)
         centerLay = QVBoxLayout(centerPanel)
-        centerLay.setContentsMargins(12, 12, 12, 12)
-        centerLay.setSpacing(6)
+        centerLay.setContentsMargins(8,8,8,8)
+        centerLay.setSpacing(4)
 
         analysisHeader = QLabel("AI ANALYSIS RESULT:")
         analysisHeader.setObjectName("MidTopStrip")
         analysisHeader.setAlignment(Qt.AlignCenter)
-        analysisHeader.setFixedHeight(40)
+        analysisHeader.setFixedHeight(32)
         centerLay.addWidget(analysisHeader)
-
-        centerLay.addSpacing(8)
 
         gradeTitle = QLabel("GRADE")
         gradeTitle.setObjectName("MidGradeTitle")
         gradeTitle.setAlignment(Qt.AlignCenter)
-        gradeTitle.setFixedHeight(28)
+        gradeTitle.setFixedHeight(22)
         centerLay.addWidget(gradeTitle)
 
-        centerLay.addSpacing(4)
-
+        centerLay.addSpacing(2)
         gradeWrap = QFrame()
         gradeWrap.setObjectName("MidGradeWrap")
         gradeWrapLay = QHBoxLayout(gradeWrap)
-        gradeWrapLay.setContentsMargins(20, 0, 20, 0)
-        gradeWrapLay.setSpacing(0)
-
+        gradeWrapLay.setContentsMargins(16,0,16,0)
         self.gradeValue = QLabel("GRADE 1")
         self.gradeValue.setObjectName("MidGradeBig")
         self.gradeValue.setAlignment(Qt.AlignCenter)
-        self.gradeValue.setFixedHeight(56)
+        self.gradeValue.setFixedHeight(42)
         gradeWrapLay.addWidget(self.gradeValue)
-
         centerLay.addWidget(gradeWrap)
 
-        centerLay.addSpacing(14)
-
+        centerLay.addSpacing(8)
         confTitle = QLabel("CONFIDENCE LEVEL:")
         confTitle.setObjectName("MidConfidenceTitle")
         confTitle.setAlignment(Qt.AlignCenter)
-        confTitle.setFixedHeight(30)
+        confTitle.setFixedHeight(24)
         centerLay.addWidget(confTitle)
-
-        centerLay.addSpacing(8)
+        centerLay.addSpacing(4)
 
         self.confGauge = ConfidenceGauge(self)
         centerLay.addWidget(self.confGauge, 0, Qt.AlignCenter)
-
-        centerLay.addSpacing(14)
+        centerLay.addSpacing(8)
 
         self.colorNote = QLabel("Clean and White to Pale Color")
         self.colorNote.setObjectName("MidBottomNote")
         self.colorNote.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
-        self.colorNote.setFixedHeight(54)
+        self.colorNote.setFixedHeight(40)
         centerLay.addWidget(self.colorNote)
 
-        # RIGHT
+        # RIGHT Column
         rightCol = QVBoxLayout()
-        rightCol.setSpacing(12)
-        rightCol.setContentsMargins(0, 0, 0, 0)
+        rightCol.setSpacing(8)
+        rightCol.setContentsMargins(0,0,0,0)
 
+        # Batch Panel
         batchPanel = SoftPanel()
         batchPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         batchLay = QVBoxLayout(batchPanel)
-        batchLay.setContentsMargins(8, 8, 8, 10)
-        batchLay.setSpacing(8)
-
+        batchLay.setContentsMargins(6,6,6,8)
+        batchLay.setSpacing(6)
         batchHead = BrownHeader("BATCH COUNT")
-        batchHead.setFixedHeight(48)
+        batchHead.setFixedHeight(36)
         batchLay.addWidget(batchHead)
-
         self.batchLabel = QLabel("BATCH 1: 26 COPRA")
         self.batchLabel.setObjectName("BatchValueText")
         self.batchLabel.setAlignment(Qt.AlignCenter)
         batchLay.addWidget(self.batchLabel)
         batchLay.addStretch(1)
 
+        # Sensor Panel
         sensorPanel = SoftPanel()
         sensorPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         sensorLay = QVBoxLayout(sensorPanel)
-        sensorLay.setContentsMargins(8, 8, 8, 8)
-        sensorLay.setSpacing(8)
-
+        sensorLay.setContentsMargins(6,6,6,6)
+        sensorLay.setSpacing(6)
         sensorHead = CreamHeader("SENSOR READING")
-        sensorHead.setFixedHeight(48)
+        sensorHead.setFixedHeight(36)
         sensorLay.addWidget(sensorHead)
-
         self.copraStatus = QLabel("COPRA STATUS: WET")
         self.copraStatus.setObjectName("SensorStatusText")
         self.copraStatus.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -290,32 +434,27 @@ class MainWindow(QMainWindow):
         moistureBox = QFrame()
         moistureBox.setObjectName("MoistureBox")
         moistureLay = QHBoxLayout(moistureBox)
-        moistureLay.setContentsMargins(16, 8, 16, 8)
-        moistureLay.setSpacing(8)
-
+        moistureLay.setContentsMargins(12,6,12,6)
+        moistureLay.setSpacing(6)
         self.moistureLabelTitle = QLabel("MOISTURE LEVEL:")
         self.moistureLabelTitle.setObjectName("MoistureTitle")
-
         self.moistureValue = QLabel("12%")
         self.moistureValue.setObjectName("MoistureValue")
         self.moistureValue.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
-
         moistureLay.addWidget(self.moistureLabelTitle, 1)
         moistureLay.addWidget(self.moistureValue, 0)
-
         sensorLay.addWidget(moistureBox)
         sensorLay.addStretch(1)
 
+        # Recommendation Panel
         recoPanel = SoftPanel()
         recoPanel.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Expanding)
         recoLay = QVBoxLayout(recoPanel)
-        recoLay.setContentsMargins(8, 8, 8, 10)
-        recoLay.setSpacing(8)
-
+        recoLay.setContentsMargins(6,6,6,8)
+        recoLay.setSpacing(6)
         recoHead = BrownHeader("RECOMMENDATION")
-        recoHead.setFixedHeight(48)
+        recoHead.setFixedHeight(36)
         recoLay.addWidget(recoHead)
-
         self.recommendation = QLabel("✔ PASSED: READY TO SELL")
         self.recommendation.setObjectName("RecoValueText")
         self.recommendation.setAlignment(Qt.AlignVCenter | Qt.AlignLeft)
@@ -326,46 +465,45 @@ class MainWindow(QMainWindow):
         rightCol.addWidget(sensorPanel, 4)
         rightCol.addWidget(recoPanel, 2)
 
-        bodyLay.addWidget(leftPanel, 5)
-        bodyLay.addWidget(centerPanel, 4)
-        bodyLay.addLayout(rightCol, 5)
-        outer.addWidget(bodyWrap, 1)
+        bodyLay.addWidget(leftPanel,5)
+        bodyLay.addWidget(centerPanel,4)
+        bodyLay.addLayout(rightCol,5)
+        outer.addWidget(bodyWrap,1)
 
+        # Bottom Buttons
         bottomWrap = QFrame()
         bottomWrap.setObjectName("BottomWrap")
         bottomLay = QHBoxLayout(bottomWrap)
-        bottomLay.setContentsMargins(12, 12, 12, 14)
-        bottomLay.setSpacing(16)
+        bottomLay.setContentsMargins(10,10,10,10)
+        bottomLay.setSpacing(10)
 
         self.historyBtn = QPushButton("HISTORY")
         self.historyBtn.setObjectName("FooterLightBtn")
-        self.historyBtn.setMinimumHeight(74)
+        self.historyBtn.setMinimumHeight(60)
 
         self.mainBtn = QPushButton("START")
         self.mainBtn.setObjectName("FooterMainBtn")
-        self.mainBtn.setMinimumHeight(84)
+        self.mainBtn.setMinimumHeight(72)
 
         self.reportBtn = QPushButton("RECEIPT")
         self.reportBtn.setObjectName("FooterLightBtn")
-        self.reportBtn.setMinimumHeight(74)
+        self.reportBtn.setMinimumHeight(60)
 
         self.powerBtn = QPushButton("⏻")
         self.powerBtn.setObjectName("PowerBtn")
-        self.powerBtn.setFixedSize(74, 74)
+        self.powerBtn.setFixedSize(60,60)
         self.powerBtn.setCheckable(True)
 
-        bottomLay.addWidget(self.historyBtn, 3)
-        bottomLay.addWidget(self.mainBtn, 5)
-        bottomLay.addWidget(self.reportBtn, 3)
-        bottomLay.addWidget(self.powerBtn, 0)
+        bottomLay.addWidget(self.historyBtn,3)
+        bottomLay.addWidget(self.mainBtn,5)
+        bottomLay.addWidget(self.reportBtn,3)
+        bottomLay.addWidget(self.powerBtn,0)
         outer.addWidget(bottomWrap)
 
         self.reportDialog = ReportDialog(self)
-
         self.mainBtn.clicked.connect(self.toggle_system)
         self.historyBtn.clicked.connect(self.open_history)
         self.reportBtn.clicked.connect(self.open_report)
-
         self.powerBtn.pressed.connect(self.start_power_hold)
         self.powerBtn.released.connect(self.cancel_power_hold)
 
@@ -377,14 +515,28 @@ class MainWindow(QMainWindow):
         self.apply_styles()
         self.add_shadows()
 
-        if not self.cap.isOpened():
-            self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
-            self.previewLabel.setAlignment(Qt.AlignCenter)
+        # if not self.cap.isOpened():
+        #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+        #     self.previewLabel.setAlignment(Qt.AlignCenter)
+
+        self.overlay_label = QLabel(self)
+        self.overlay_label.setAlignment(Qt.AlignCenter)
+        self.overlay_label.setStyleSheet("""
+            background-color: rgba(0, 0, 0, 180);
+            color: white;
+            font-size: 22px;
+            border-radius: 12px;
+        """)
+        self.overlay_label.hide()
+
 
     def mouseDoubleClickEvent(self, event):
         corner_size = 120
         if event.pos().x() > self.width() - corner_size and event.pos().y() < corner_size:
             self.close()
+    
+    def on_camera_failed(self):
+        self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
 
     def start_power_hold(self):
         self.powerBtn.setText("...")
@@ -633,11 +785,11 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("DangerBtn")
             self._repolish(self.mainBtn)
 
-            if self.cap.isOpened():
-                self.preview_timer.start(CAM_FPS_MS)
-            else:
-                self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
-                self.previewLabel.setAlignment(Qt.AlignCenter)
+            # if self.cap.isOpened():
+            #     self.preview_timer.start(CAM_FPS_MS)
+            # else:
+            #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+            #     self.previewLabel.setAlignment(Qt.AlignCenter)
 
             self.ai_timer.stop()
             QTimer.singleShot(AI_FIRST_READ_DELAY_MS, self.do_ai_read)
@@ -649,7 +801,7 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("FooterMainBtn")
             self._repolish(self.mainBtn)
 
-            self.preview_timer.stop()
+            # self.preview_timer.stop()
             self.ai_timer.stop()
             self.confGauge.stop_animation()
 
@@ -660,38 +812,27 @@ class MainWindow(QMainWindow):
                 self._set_preview_from_bgr(self.last_frame)
 
     def do_ai_read(self):
-        if not self.is_running:
+        if not self.is_running or self.last_frame is None:
+            return
+        
+        if self.is_paused_for_measurement:
+            return
+        
+        if self.ai_thread_running:
             return
 
-        import random
+        self.ai_thread_running = True
 
-        confidence = random.uniform(35.0, 95.0)
-        moisture = random.randint(10, 18)
+        self.ai_worker = AIWorker(
+            self.last_frame,
+            self.interpreter,
+            self.input_details,
+            self.output_details
+        )
 
-        self.confGauge.set_target(confidence)
-        self.moistureValue.setText(f"{moisture}%")
-
-        if confidence >= 85:
-            self.gradeValue.setText("GRADE 1")
-            self.colorNote.setText("Clean and White to Pale Color")
-            self.recommendation.setText("✔ PASSED: READY TO SELL")
-        elif confidence >= 70:
-            self.gradeValue.setText("GRADE 2")
-            self.colorNote.setText("Good Color and Acceptable Quality")
-            self.recommendation.setText("✔ PASSED: GOOD FOR MARKET")
-        elif confidence >= 50:
-            self.gradeValue.setText("GRADE 3")
-            self.colorNote.setText("Needs Further Drying / Sorting")
-            self.recommendation.setText("⚠ NEEDS FURTHER PROCESS")
-        else:
-            self.gradeValue.setText("REJECT")
-            self.colorNote.setText("Poor Quality and High Moisture")
-            self.recommendation.setText("✖ REJECTED: NOT READY")
-
-        if moisture >= 14:
-            self.copraStatus.setText("COPRA STATUS: WET")
-        else:
-            self.copraStatus.setText("COPRA STATUS: DRY")
+        self.ai_worker.result_ready.connect(self.handle_ai_result)
+        self.ai_worker.finished.connect(self.on_ai_finished)
+        self.ai_worker.start()
 
     def _repolish(self, widget):
         widget.style().unpolish(widget)
@@ -705,18 +846,11 @@ class MainWindow(QMainWindow):
         frame_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         h, w, ch = frame_rgb.shape
         bytes_per_line = ch * w
-        qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888).copy()
+        frame_rgb = np.ascontiguousarray(frame_rgb)
+        qt_image = QImage(frame_rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
         self.previewLabel.setPixmap(QPixmap.fromImage(qt_image))
         self.previewLabel.setAlignment(Qt.AlignCenter)
 
-    def update_frame(self):
-        if not self.cap.isOpened():
-            return
-        ret, frame = self.cap.read()
-        if not ret:
-            return
-        self.last_frame = frame
-        self._set_preview_from_bgr(frame)
 
     def closeEvent(self, event):
         try:
@@ -735,20 +869,246 @@ class MainWindow(QMainWindow):
             self.confGauge.stop_animation()
         except Exception:
             pass
+        # try:
+        #     if self.cap is not None:
+        #         self.cap.release()
+        # except Exception:
+        #     pass
         try:
-            if self.cap is not None:
-                self.cap.release()
+            self.camera_thread.stop()
         except Exception:
             pass
         super().closeEvent(event)
 
+    def on_ai_finished(self):
+        self.ai_thread_running = False
+        self.ai_worker.deleteLater()
+        self.ai_worker = None
+
+
+    def handle_ai_result(self, label, confidence):
+        confidence_percent = confidence * 100.0
+        self.confGauge.set_target(confidence_percent)
+
+        # === Grade Mapping ===
+        grade_map = {
+            'G1': ("GRADE 1", "Clean and White to Pale Color", "✔ PASSED: READY TO SELL"),
+            'G2': ("GRADE 2", "Good Color and Acceptable Quality", "✔ PASSED: GOOD FOR MARKET"),
+            'G3': ("GRADE 3", "Needs Further Drying / Sorting", "⚠ NEEDS FURTHER PROCESS"),
+            'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY")
+        }
+
+        grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
+        self.captured_label = grade
+
+        self.gradeValue.setText(grade)
+        self.colorNote.setText(note)
+        self.recommendation.setText(reco)
+
+        # === Stability Logic (auto capture trigger) ===
+        if confidence >= self.MIN_CONFIDENCE:
+            if label == self.last_label:
+                self.stable_counter += 1
+            else:
+                self.stable_counter = 1
+                self.last_label = label
+        else:
+            self.stable_counter = 0
+            self.last_label = None
+
+        if self.stable_counter >= self.STABLE_REQUIRED and not self.capture_cooldown:
+            self.capture_cooldown = True
+            self.auto_capture(label, confidence)
+
+    def process_moisture(self, moisture, grade=None):
+        if self.moisture_done:
+            return
+
+        # Step 1: wait for threshold
+        if not self.moisture_samples and moisture < self.moisture_threshold:
+            self.show_overlay(f"Moisture: {moisture:.2f}%\nWaiting threshold...")
+            return
+
+        # Step 2: collect sample and optional grade
+        self.moisture_samples.append(moisture)
+        if grade:
+            self.arduino_grades.append(grade)
+
+        # Compute current mode of grades (live)
+        try:
+            current_mode_grade = mode(self.arduino_grades) if self.arduino_grades else "-"
+        except StatisticsError:
+            current_mode_grade = "-"
+
+        self.show_overlay(
+            f"Moisture: {moisture:.2f}%\n"
+            f"Samples: {len(self.moisture_samples)}/{self.required_samples}\n"
+            f"Current Grade Mode: {current_mode_grade}"
+        )
+
+        # Step 3: finalize if enough samples
+        if len(self.moisture_samples) >= self.required_samples:
+            self.moisture_done = True
+            avg_moisture = sum(self.moisture_samples) / len(self.moisture_samples)
+            try:
+                moisture_final_grade = mode(self.arduino_grades) if self.arduino_grades else self.captured_label
+            except StatisticsError:
+                moisture_final_grade = self.captured_label
+
+            self.show_overlay(f"Final Moisture:\n{avg_moisture:.2f}%\nFinal Moisture Grade: {moisture_final_grade}")
+            QTimer.singleShot(1500, lambda: self.finish_capture(avg_moisture, moisture_final_grade))
+
+    def read_serial(self):
+        if self.ser.in_waiting > 0:
+            try:
+                line = self.ser.readline().decode('utf-8').strip()
+                print("[SERIAL]", line)
+
+                # Parse moisture
+                moisture_match = re.search(r"Moisture:\s*([\d.]+)", line)
+                grade_match = re.search(r"RESULT:\s*(GRADE \d+|REJECT)", line)
+
+                if grade_match:
+                    arduino_grade = grade_match.group(1)
+                    print("ARDUINO GRADE RAW:", arduino_grade)
+                else:
+                    print("GRADE NOT MATCHED")
+
+                if moisture_match:
+                    value = float(moisture_match.group(1))
+                    self.current_moisture = value
+                    self.moistureValue.setText(f"{int(value)}%")
+
+                    if value >= 14:
+                        self.copraStatus.setText("COPRA STATUS: WET")
+                    else:
+                        self.copraStatus.setText("COPRA STATUS: DRY")
+
+                    # Only pass to capture logic if we're waiting for stable reading
+                    if self.awaiting_stable_reading:
+                        # Normalize Arduino grade into DB format
+                        if grade_match:
+                            final_grade = grade_match.group(1).upper()  # already "GRADE 1", "GRADE 2", or "REJECT"
+                        else:
+                            final_grade = "REJECT"
+
+                        self.process_moisture(value, final_grade)
+
+            except Exception as e:
+                print("Serial error:", e)
+
+    def finish_capture(self, avg_moisture, moisture_grade):
+        print("[SYSTEM] Finalizing capture")
+
+        # Determine final grade as the worst between AI and moisture
+        ai_grade = self.captured_label
+        # Normalize both grades immediately
+        normalized_ai_grade = {
+            'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT',
+            'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT'
+        }.get(self.captured_label, 'REJECT')  # default to REJECT if unknown
+
+        normalized_moisture_grade = {
+            'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT',
+            'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT'
+        }.get(moisture_grade, 'REJECT')
+
+        # Now pick worst
+        final_grade_to_save = get_worst_grade(normalized_ai_grade, normalized_moisture_grade)
+
+        print("[DEBUG] AI:", normalized_ai_grade, "Moisture:", normalized_moisture_grade, "FINAL:", final_grade_to_save)
+
+        base_dir = "/home/aldenrecharge/Desktop/Raspberry/images"
+        batch_folder = os.path.join(base_dir, f"batch_{self.current_batch_id:03}")
+        os.makedirs(batch_folder, exist_ok=True)
+
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"{final_grade_to_save}_{int(self.captured_confidence*100)}_{timestamp}.jpg"
+        filepath = os.path.join(batch_folder, filename)
+
+        # Save image
+        cv2.imwrite(filepath, self.captured_frame)
+        filepath = os.path.abspath(filepath)
+
+        print(f"[SAVED] {filepath} | Moisture Avg: {avg_moisture:.2f} | Final Grade: {final_grade_to_save}")
+
+        # Save to DB
+        try:
+            create_tables.save_image(
+                batch_id=self.current_batch_id,
+                image_path=filepath,
+                grade=final_grade_to_save
+            )
+            print("[DB] Capture saved successfully.")
+        except Exception as e:
+            print("[DB ERROR]", e)
+
+        # Update UI
+        try:
+            text = self.batchLabel.text()
+            num = int(text.split(":")[1].split()[0])
+            num += 1
+            self.batchLabel.setText(f"BATCH 1: {num} COPRA")
+        except:
+            pass
+
+        # Reset state
+        self.overlay_label.hide()
+        self.is_paused_for_measurement = False
+        self.awaiting_stable_reading = False
+        self.moisture_samples.clear()
+        self.arduino_grades.clear()
+        QTimer.singleShot(3000, self.reset_capture_state)
+        self.moisture_done = False
+
+    def auto_capture(self, label, confidence):
+        if self.last_frame is None:
+            return
+
+        print("[AUTO] Capture triggered")
+
+        # Save frame temporarily (DO NOT SAVE YET)
+        self.captured_frame = self.last_frame.copy()
+        self.captured_label = label
+        self.captured_confidence = confidence
+
+        # Pause system
+        self.is_paused_for_measurement = True
+        self.awaiting_stable_reading = True
+        self.moisture_samples.clear()
+
+        # Show overlay
+        self.show_overlay("Waiting for moisture...")
+
+    def show_overlay(self, text):
+        self.overlay_label.setText(text)
+
+        self.overlay_label.setGeometry(
+            self.width()//2 - 180,
+            self.height()//2 - 90,
+            360,
+            180
+        )
+
+        self.overlay_label.show()
+
+    def reset_capture_state(self):
+        self.capture_cooldown = False
+        self.stable_counter = 0
+        self.last_label = None
+
+    def update_preview(self, frame):
+        if frame is None:
+            return
+
+        self.last_frame = frame.copy()  # 👈 prevent race condition
+        self._set_preview_from_bgr(frame)
 
 def main():
     app = QApplication(sys.argv)
     w = MainWindow()
     w.showFullScreen()
     sys.exit(app.exec_())
-
 
 if __name__ == "__main__":
     main()
