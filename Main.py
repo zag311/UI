@@ -276,10 +276,19 @@ class MainWindow(QMainWindow):
         # self.capture_cooldown = False
 
         # Serial
-        self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+        try:
+            self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
+            self.serial_connected = True
+            print("[SERIAL] Connected")
+        except Exception as e:
+            self.ser = None
+            self.serial_connected = False
+            print("[SERIAL] Not connected:", e)
         self.serial_timer = QTimer(self)
         self.serial_timer.timeout.connect(self.read_serial)
-        self.serial_timer.start(200)
+
+        if self.serial_connected:
+            self.serial_timer.start(200)
 
         self.setWindowFlags(Qt.FramelessWindowHint)
         self.setWindowTitle("Copra Quality Analysis System")
@@ -784,7 +793,7 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("DangerBtn")
             self._repolish(self.mainBtn)
 
-            if self.cap.isOpened():
+            if self.cap:
                 self.preview_timer.start(CAM_FPS_MS)
             else:
                 self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
@@ -968,20 +977,16 @@ class MainWindow(QMainWindow):
             QTimer.singleShot(1500, lambda: self.finish_capture(avg_moisture, moisture_final_grade))
 
     def read_serial(self):
+        if not self.ser or not self.serial_connected:
+            return
+
         if self.ser.in_waiting > 0:
             try:
                 line = self.ser.readline().decode('utf-8').strip()
                 print("[SERIAL]", line)
 
-                # Parse moisture
                 moisture_match = re.search(r"Moisture:\s*([\d.]+)", line)
                 grade_match = re.search(r"RESULT:\s*(GRADE \d+|REJECT|NON-COPRA)", line)
-
-                if grade_match:
-                    arduino_grade = grade_match.group(1)
-                    print("ARDUINO GRADE RAW:", arduino_grade)
-                else:
-                    print("GRADE NOT MATCHED")
 
                 if moisture_match:
                     value = float(moisture_match.group(1))
@@ -1038,7 +1043,11 @@ class MainWindow(QMainWindow):
         filepath = os.path.join(batch_folder, filename)
 
         # Save image
-        cv2.imwrite(filepath, self.captured_frame)
+        if self.captured_frame is not None:
+            cv2.imwrite(filepath, self.captured_frame)
+            print(f"[SAVED IMAGE] {filepath}")
+        else:
+            print("[INFO] No image captured (camera disabled)")
         filepath = os.path.abspath(filepath)
 
         print(f"[SAVED] {filepath} | Moisture Avg: {avg_moisture:.2f} | Final Grade: {final_grade_to_save}")
@@ -1073,8 +1082,10 @@ class MainWindow(QMainWindow):
         self.moisture_done = False
 
     def auto_capture(self, label, confidence):
-        if self.last_frame is None:
-            return
+        if self.last_frame is not None:
+            self.captured_frame = self.last_frame.copy()
+        else:
+            self.captured_frame = None  # 👈 allow no image
 
         print("[AUTO] Capture triggered")
 
@@ -1116,7 +1127,15 @@ class MainWindow(QMainWindow):
     #     self._set_preview_from_bgr(frame)
 
     def update_preview(self):
-        if not self.cap or not self.cap.isOpened():
+        if self.cap is None:
+            # No camera mode
+            self.previewLabel.setText("Camera Disabled")
+            self.previewLabel.setAlignment(Qt.AlignCenter)
+            return
+
+        if not self.cap.isOpened():
+            self.previewLabel.setText("No camera detected")
+            self.previewLabel.setAlignment(Qt.AlignCenter)
             return
 
         ret, frame = self.cap.read()
@@ -1128,8 +1147,10 @@ class MainWindow(QMainWindow):
 
 def main():
     app = QApplication(sys.argv)
+    create_tables.init_db()
     w = MainWindow()
     w.showFullScreen()
+
     sys.exit(app.exec_())
 
 if __name__ == "__main__":
