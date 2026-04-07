@@ -2,10 +2,10 @@ import sys
 import os
 import cv2
 # import tensorflow as tf
-# import numpy as np
-# import serial
-# import re
-# import create_tables
+import numpy as np
+import serial
+import re
+import create_tables
 from datetime import datetime
 from statistics import mode, StatisticsError
 
@@ -239,10 +239,10 @@ class MainWindow(QMainWindow):
 
         # create_tables.init_db()
 
-        self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
-        self.camera_thread.frame_ready.connect(self.update_preview)
-        self.camera_thread.start()
-        self.camera_thread.camera_failed.connect(self.on_camera_failed)
+        # self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
+        # self.camera_thread.frame_ready.connect(self.update_preview)
+        # self.camera_thread.start()
+        # self.camera_thread.camera_failed.connect(self.on_camera_failed)
         self.moisture_samples = []
         self.arduino_grades = []  # new list to track grades
 
@@ -263,17 +263,17 @@ class MainWindow(QMainWindow):
         self.awaiting_stable_reading = False
 
         # Load AI model
-        self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-        self.interpreter.allocate_tensors()
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
+        # self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+        # self.interpreter.allocate_tensors()
+        # self.input_details = self.interpreter.get_input_details()
+        # self.output_details = self.interpreter.get_output_details()
 
-        self.ai_thread_running = False
-        self.last_label = None
-        self.stable_counter = 0
-        self.STABLE_REQUIRED = 3
-        self.MIN_CONFIDENCE = 0.80
-        self.capture_cooldown = False
+        # self.ai_thread_running = False
+        # self.last_label = None
+        # self.stable_counter = 0
+        # self.STABLE_REQUIRED = 3
+        # self.MIN_CONFIDENCE = 0.80
+        # self.capture_cooldown = False
 
         # Serial
         self.ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=1)
@@ -291,15 +291,16 @@ class MainWindow(QMainWindow):
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
         self.cap.set(cv2.CAP_PROP_FPS, 30)
         self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self.update_preview)
         self.is_running = False
         self.last_frame = None
 
-        self.ai_timer = QTimer(self)
-        self.ai_timer.setInterval(AI_READ_INTERVAL_MS)
-        self.ai_timer.timeout.connect(self.do_ai_read)
+        # self.ai_timer = QTimer(self)
+        # self.ai_timer.setInterval(AI_READ_INTERVAL_MS)
+        # self.ai_timer.timeout.connect(self.do_ai_read)
 
         self.powerHoldTimer = QTimer(self)
         self.powerHoldTimer.setSingleShot(True)
@@ -342,9 +343,9 @@ class MainWindow(QMainWindow):
         self.previewLabel.setAlignment(Qt.AlignCenter)
         self.previewLabel.setMinimumSize(280, 200)
         leftLay.addWidget(self.previewLabel, 0, Qt.AlignCenter)
-        # if not self.cap.isOpened():
-        #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
-        #     self.previewLabel.setAlignment(Qt.AlignCenter)
+        if not self.cap.isOpened():
+            self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+            self.previewLabel.setAlignment(Qt.AlignCenter)
 
         # CENTER Panel
         centerPanel = SoftPanel()
@@ -783,15 +784,15 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("DangerBtn")
             self._repolish(self.mainBtn)
 
-            # if self.cap.isOpened():
-            #     self.preview_timer.start(CAM_FPS_MS)
-            # else:
-            #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
-            #     self.previewLabel.setAlignment(Qt.AlignCenter)
+            if self.cap.isOpened():
+                self.preview_timer.start(CAM_FPS_MS)
+            else:
+                self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+                self.previewLabel.setAlignment(Qt.AlignCenter)
 
-            self.ai_timer.stop()
-            QTimer.singleShot(AI_FIRST_READ_DELAY_MS, self.do_ai_read)
-            self.ai_timer.start()
+            # self.ai_timer.stop()
+            # QTimer.singleShot(AI_FIRST_READ_DELAY_MS, self.do_ai_read)
+            # self.ai_timer.start()
 
         else:
             self.is_running = False
@@ -799,8 +800,8 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("FooterMainBtn")
             self._repolish(self.mainBtn)
 
-            # self.preview_timer.stop()
-            self.ai_timer.stop()
+            self.preview_timer.stop()
+            # self.ai_timer.stop()
             self.confGauge.stop_animation()
 
             if self.last_frame is None:
@@ -808,6 +809,8 @@ class MainWindow(QMainWindow):
                 self.previewLabel.setAlignment(Qt.AlignCenter)
             else:
                 self._set_preview_from_bgr(self.last_frame)
+                # Temporary addition for testing purposes
+                self.auto_capture("GRADE 1", 1.0)
 
     # def do_ai_read(self):
     #     if not self.is_running or self.last_frame is None:
@@ -867,15 +870,15 @@ class MainWindow(QMainWindow):
             self.confGauge.stop_animation()
         except Exception:
             pass
-        # try:
-        #     if self.cap is not None:
-        #         self.cap.release()
-        # except Exception:
-        #     pass
         try:
-            self.camera_thread.stop()
+            if self.cap is not None:
+                self.cap.release()
         except Exception:
             pass
+        # try:
+        #     self.camera_thread.stop()
+        # except Exception:
+        #     pass
         super().closeEvent(event)
 
     def on_ai_finished(self):
@@ -884,47 +887,47 @@ class MainWindow(QMainWindow):
         self.ai_worker = None
 
 
-    def handle_ai_result(self, label, confidence):
-        confidence_percent = confidence * 100.0
-        self.confGauge.set_target(confidence_percent)
+    # def handle_ai_result(self, label, confidence):
+    #     confidence_percent = confidence * 100.0
+    #     self.confGauge.set_target(confidence_percent)
 
-        # === Grade Mapping ===
-        grade_map = {
-            'G1': ("GRADE 1", "Clean and White to Pale Color", "✔ PASSED: READY TO SELL"),
-            'G2': ("GRADE 2", "Good Color and Acceptable Quality", "✔ PASSED: GOOD FOR MARKET"),
-            'G3': ("GRADE 3", "Needs Further Drying / Sorting", "⚠ NEEDS FURTHER PROCESS"),
-            'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY"),
-            'NOT': ("NON-COPRA", "Not a copra sample", "Ignored")
-        }
+    #     # === Grade Mapping ===
+    #     grade_map = {
+    #         'G1': ("GRADE 1", "Clean and White to Pale Color", "✔ PASSED: READY TO SELL"),
+    #         'G2': ("GRADE 2", "Good Color and Acceptable Quality", "✔ PASSED: GOOD FOR MARKET"),
+    #         'G3': ("GRADE 3", "Needs Further Drying / Sorting", "⚠ NEEDS FURTHER PROCESS"),
+    #         'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY"),
+    #         'NOT': ("NON-COPRA", "Not a copra sample", "Ignored")
+    #     }
 
-        grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
-        self.captured_label = grade
+    #     grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
+    #     self.captured_label = grade
 
-        # === UI Update (optional: still show NON-COPRA) ===
-        self.gradeValue.setText(grade)
-        self.colorNote.setText(note)
-        self.recommendation.setText(reco)
+    #     # === UI Update (optional: still show NON-COPRA) ===
+    #     self.gradeValue.setText(grade)
+    #     self.colorNote.setText(note)
+    #     self.recommendation.setText(reco)
 
-        # === 🚫 HARD FILTER ===
-        if label == "NOT":
-            self.stable_counter = 0
-            self.last_label = None
-            return  # 💀 kill the pipeline here
+    #     # === 🚫 HARD FILTER ===
+    #     if label == "NOT":
+    #         self.stable_counter = 0
+    #         self.last_label = None
+    #         return  # 💀 kill the pipeline here
 
-        # === Stability Logic (auto capture trigger) ===
-        if confidence >= self.MIN_CONFIDENCE:
-            if label == self.last_label:
-                self.stable_counter += 1
-            else:
-                self.stable_counter = 1
-                self.last_label = label
-        else:
-            self.stable_counter = 0
-            self.last_label = None
+    #     # === Stability Logic (auto capture trigger) ===
+    #     if confidence >= self.MIN_CONFIDENCE:
+    #         if label == self.last_label:
+    #             self.stable_counter += 1
+    #         else:
+    #             self.stable_counter = 1
+    #             self.last_label = label
+    #     else:
+    #         self.stable_counter = 0
+    #         self.last_label = None
 
-        if self.stable_counter >= self.STABLE_REQUIRED and not self.capture_cooldown:
-            self.capture_cooldown = True
-            self.auto_capture(label, confidence)
+    #     if self.stable_counter >= self.STABLE_REQUIRED and not self.capture_cooldown:
+    #         self.capture_cooldown = True
+    #         self.auto_capture(label, confidence)
 
     def process_moisture(self, moisture, grade=None):
         if self.moisture_done:
@@ -1007,7 +1010,9 @@ class MainWindow(QMainWindow):
         print("[SYSTEM] Finalizing capture")
 
         # Determine final grade as the worst between AI and moisture
-        ai_grade = self.captured_label
+        # ai_grade = self.captured_label
+        # Temporary for testing
+        ai_grade = getattr(self, "captured_label", "GRADE 1")
         # Normalize both grades immediately
         normalized_ai_grade = {
             'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT', 'NOT': 'NON-COPRA',
@@ -1103,11 +1108,22 @@ class MainWindow(QMainWindow):
         self.stable_counter = 0
         self.last_label = None
 
-    def update_preview(self, frame):
-        if frame is None:
+    # def update_preview(self, frame):
+    #     if frame is None:
+    #         return
+
+    #     self.last_frame = frame.copy()  # 👈 prevent race condition
+    #     self._set_preview_from_bgr(frame)
+
+    def update_preview(self):
+        if not self.cap or not self.cap.isOpened():
             return
 
-        self.last_frame = frame.copy()  # 👈 prevent race condition
+        ret, frame = self.cap.read()
+        if not ret or frame is None:
+            return
+
+        self.last_frame = frame.copy()
         self._set_preview_from_bgr(frame)
 
 def main():
