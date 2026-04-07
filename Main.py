@@ -1,11 +1,11 @@
 import sys
 import os
 import cv2
-import tensorflow as tf
-import numpy as np
-import serial
-import re
-import create_tables
+# import tensorflow as tf
+# import numpy as np
+# import serial
+# import re
+# import create_tables
 from datetime import datetime
 from statistics import mode, StatisticsError
 
@@ -27,8 +27,8 @@ from history import HistoryDialog
 from report import ReportDialog
 
 # ===== Constants (Scaled down) =====
-MODEL_PATH = "/home/aldenrecharge/Desktop/Copra_AI/Copra_Test_UpdateV2.tflite"
-CLASS_NAMES = ['G1', 'G2', 'G3', 'REJ']
+MODEL_PATH = "/home/aldenrecharge/Desktop/Copra_AI/Copra_Final.tflite"
+CLASS_NAMES = ['G1', 'G2', 'G3', 'REJ', 'NOT']
 IMAGE_SIZE = (224, 224)
 PREVIEW_W = 360
 PREVIEW_H = 450
@@ -44,7 +44,7 @@ NORMALIZED_RANK = {
     "GRADE 3": 3,
     "G3": 3,
     "REJECT": 4,
-    "REJ": 4
+    "REJ": 4,
 }
 
 def get_worst_grade(grade1, grade2):
@@ -206,40 +206,38 @@ class CreamHeader(QLabel):
         self.setAlignment(Qt.AlignCenter)
 
 # ===== AI Thread =====
-class AIWorker(QThread):
-    result_ready = pyqtSignal(str, float)
+# class AIWorker(QThread):
+#     result_ready = pyqtSignal(str, float)
 
-    def __init__(self, frame, interpreter, input_details, output_details):
-        super().__init__()
-        self.frame = frame.copy()
-        self.interpreter = interpreter
-        self.input_details = input_details
-        self.output_details = output_details
+#     def __init__(self, frame, interpreter, input_details, output_details):
+#         super().__init__()
+#         self.frame = frame.copy()
+#         self.interpreter = interpreter
+#         self.input_details = input_details
+#         self.output_details = output_details
 
-    def run(self):
-        frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
-        resized = cv2.resize(frame_rgb, IMAGE_SIZE)
-        img_array = resized.astype(np.float32)
-        img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
-        img_array = np.expand_dims(img_array, axis=0)
+#     def run(self):
+#         frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+#         resized = cv2.resize(frame_rgb, IMAGE_SIZE)
+#         img_array = resized.astype(np.float32)
+#         img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
+#         img_array = np.expand_dims(img_array, axis=0)
 
-        self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
-        self.interpreter.invoke()
-        output = self.interpreter.get_tensor(self.output_details[0]['index'])
+#         self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
+#         self.interpreter.invoke()
+#         output = self.interpreter.get_tensor(self.output_details[0]['index'])
 
-        idx = int(np.argmax(output))
-        confidence = float(output[0][idx])
-        label = CLASS_NAMES[idx]
-        self.result_ready.emit(label, confidence)
+#         idx = int(np.argmax(output))
+#         confidence = float(output[0][idx])
+#         label = CLASS_NAMES[idx]
+#         self.result_ready.emit(label, confidence)
 
 # ===== Main Window =====
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        create_tables.init_db()
-
-
+        # create_tables.init_db()
 
         self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
         self.camera_thread.frame_ready.connect(self.update_preview)
@@ -287,15 +285,15 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Copra Quality Analysis System")
 
         # Camera
-        # self.cam_index = 0
-        # self.cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
-        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 400)
-        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
-        # self.cap.set(cv2.CAP_PROP_FPS, 30)
-        # self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cam_index = 0
+        self.cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 400)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
+        self.cap.set(cv2.CAP_PROP_FPS, 30)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-        # self.preview_timer = QTimer(self)
-        # self.preview_timer.timeout.connect(self.update_preview)
+        self.preview_timer = QTimer(self)
+        self.preview_timer.timeout.connect(self.update_preview)
         self.is_running = False
         self.last_frame = None
 
@@ -811,28 +809,28 @@ class MainWindow(QMainWindow):
             else:
                 self._set_preview_from_bgr(self.last_frame)
 
-    def do_ai_read(self):
-        if not self.is_running or self.last_frame is None:
-            return
+    # def do_ai_read(self):
+    #     if not self.is_running or self.last_frame is None:
+    #         return
         
-        if self.is_paused_for_measurement:
-            return
+    #     if self.is_paused_for_measurement:
+    #         return
         
-        if self.ai_thread_running:
-            return
+    #     if self.ai_thread_running:
+    #         return
 
-        self.ai_thread_running = True
+    #     self.ai_thread_running = True
 
-        self.ai_worker = AIWorker(
-            self.last_frame,
-            self.interpreter,
-            self.input_details,
-            self.output_details
-        )
+    #     self.ai_worker = AIWorker(
+    #         self.last_frame,
+    #         self.interpreter,
+    #         self.input_details,
+    #         self.output_details
+    #     )
 
-        self.ai_worker.result_ready.connect(self.handle_ai_result)
-        self.ai_worker.finished.connect(self.on_ai_finished)
-        self.ai_worker.start()
+    #     self.ai_worker.result_ready.connect(self.handle_ai_result)
+    #     self.ai_worker.finished.connect(self.on_ai_finished)
+    #     self.ai_worker.start()
 
     def _repolish(self, widget):
         widget.style().unpolish(widget)
@@ -895,15 +893,23 @@ class MainWindow(QMainWindow):
             'G1': ("GRADE 1", "Clean and White to Pale Color", "✔ PASSED: READY TO SELL"),
             'G2': ("GRADE 2", "Good Color and Acceptable Quality", "✔ PASSED: GOOD FOR MARKET"),
             'G3': ("GRADE 3", "Needs Further Drying / Sorting", "⚠ NEEDS FURTHER PROCESS"),
-            'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY")
+            'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY"),
+            'NOT': ("NON-COPRA", "Not a copra sample", "Ignored")
         }
 
         grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
         self.captured_label = grade
 
+        # === UI Update (optional: still show NON-COPRA) ===
         self.gradeValue.setText(grade)
         self.colorNote.setText(note)
         self.recommendation.setText(reco)
+
+        # === 🚫 HARD FILTER ===
+        if label == "NOT":
+            self.stable_counter = 0
+            self.last_label = None
+            return  # 💀 kill the pipeline here
 
         # === Stability Logic (auto capture trigger) ===
         if confidence >= self.MIN_CONFIDENCE:
@@ -966,7 +972,7 @@ class MainWindow(QMainWindow):
 
                 # Parse moisture
                 moisture_match = re.search(r"Moisture:\s*([\d.]+)", line)
-                grade_match = re.search(r"RESULT:\s*(GRADE \d+|REJECT)", line)
+                grade_match = re.search(r"RESULT:\s*(GRADE \d+|REJECT|NON-COPRA)", line)
 
                 if grade_match:
                     arduino_grade = grade_match.group(1)
@@ -1004,14 +1010,14 @@ class MainWindow(QMainWindow):
         ai_grade = self.captured_label
         # Normalize both grades immediately
         normalized_ai_grade = {
-            'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT',
-            'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT'
-        }.get(self.captured_label, 'REJECT')  # default to REJECT if unknown
+            'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT', 'NOT': 'NON-COPRA',
+            'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT', 'NOT': 'NON-COPRA'
+        }.get(self.captured_label, 'NON-COPRA')  # default to REJECT if unknown
 
         normalized_moisture_grade = {
-            'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT',
-            'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT'
-        }.get(moisture_grade, 'REJECT')
+            'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT', 'NOT': 'NON-COPRA',
+            'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT', 'NOT': 'NON-COPRA',
+        }.get(moisture_grade, 'NON-COPRA')
 
         # Now pick worst
         final_grade_to_save = get_worst_grade(normalized_ai_grade, normalized_moisture_grade)
@@ -1033,15 +1039,15 @@ class MainWindow(QMainWindow):
         print(f"[SAVED] {filepath} | Moisture Avg: {avg_moisture:.2f} | Final Grade: {final_grade_to_save}")
 
         # Save to DB
-        try:
-            create_tables.save_image(
-                batch_id=self.current_batch_id,
-                image_path=filepath,
-                grade=final_grade_to_save
-            )
-            print("[DB] Capture saved successfully.")
-        except Exception as e:
-            print("[DB ERROR]", e)
+        # try:
+        #     create_tables.save_image(
+        #         batch_id=self.current_batch_id,
+        #         image_path=filepath,
+        #         grade=final_grade_to_save
+        #     )
+        #     print("[DB] Capture saved successfully.")
+        # except Exception as e:
+        #     print("[DB ERROR]", e)
 
         # Update UI
         try:
