@@ -1,10 +1,13 @@
 from PyQt5.QtCore import Qt, QTimer
-from PyQt5.QtGui import QColor
+from PyQt5.QtGui import QColor, QTextDocument, QFont
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QFrame, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
-    QGraphicsDropShadowEffect, QGraphicsBlurEffect
+    QGraphicsDropShadowEffect, QGraphicsBlurEffect,
+    QTextEdit
 )
+from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
+from datetime import datetime
 
 
 class MoistureBar(QWidget):
@@ -28,6 +31,193 @@ class MoistureBar(QWidget):
                 border-radius: 4px;
             }
         """)
+
+
+class ReceiptDialog(QDialog):
+    def __init__(self, receipt_text, parent=None):
+        super().__init__(parent)
+        self.receipt_text = receipt_text
+        self.main_parent = parent
+        self.blur_effect = None
+
+        self.setModal(True)
+        self.setFixedSize(300, 650)
+        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(12, 12, 12, 12)
+
+        self.card = QFrame()
+        self.card.setObjectName("ReceiptCard")
+        outer.addWidget(self.card)
+
+        shadow = QGraphicsDropShadowEffect(self)
+        shadow.setBlurRadius(24)
+        shadow.setOffset(0, 6)
+        shadow.setColor(QColor(0, 0, 0, 80))
+        self.card.setGraphicsEffect(shadow)
+
+        root = QVBoxLayout(self.card)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
+
+        self.logoLabel = QLabel("🧾")
+        self.logoLabel.setAlignment(Qt.AlignCenter)
+        self.logoLabel.setObjectName("ReceiptLogo")
+        root.addWidget(self.logoLabel)
+
+        self.headerLabel = QLabel("COPRA QUALITY ANALYSIS")
+        self.headerLabel.setAlignment(Qt.AlignCenter)
+        self.headerLabel.setObjectName("ReceiptHeader")
+        root.addWidget(self.headerLabel)
+
+        self.subHeaderLabel = QLabel("SYSTEM RECEIPT")
+        self.subHeaderLabel.setAlignment(Qt.AlignCenter)
+        self.subHeaderLabel.setObjectName("ReceiptSubHeader")
+        root.addWidget(self.subHeaderLabel)
+
+        line = QFrame()
+        line.setFrameShape(QFrame.HLine)
+        line.setObjectName("ReceiptLine")
+        root.addWidget(line)
+
+        self.textEdit = QTextEdit()
+        self.textEdit.setReadOnly(True)
+        self.textEdit.setObjectName("ReceiptText")
+        self.textEdit.setPlainText(receipt_text)
+        self.textEdit.setFont(QFont("Courier New", 9))
+        root.addWidget(self.textEdit, 1)
+
+        btnRow = QHBoxLayout()
+        btnRow.setSpacing(8)
+
+        self.printBtn = QPushButton("Print")
+        self.printBtn.setObjectName("ReceiptBtn")
+        self.printBtn.clicked.connect(self.handle_print)
+
+        self.closeBtn = QPushButton("Close")
+        self.closeBtn.setObjectName("ReceiptBtn")
+        self.closeBtn.clicked.connect(self.close)
+
+        btnRow.addWidget(self.printBtn)
+        btnRow.addWidget(self.closeBtn)
+        root.addLayout(btnRow)
+
+        self.setStyleSheet("""
+            QDialog {
+                background: rgba(0, 0, 0, 150);
+            }
+
+            #ReceiptCard {
+                background: #ffffff;
+                border-radius: 10px;
+                border: 1px solid #d8d8d8;
+            }
+
+            #ReceiptLogo {
+                font-size: 20px;
+                color: #111111;
+                background: transparent;
+            }
+
+            #ReceiptHeader {
+                font-size: 13px;
+                font-weight: 800;
+                color: #111111;
+                background: transparent;
+            }
+
+            #ReceiptSubHeader {
+                font-size: 11px;
+                font-weight: 700;
+                color: #333333;
+                background: transparent;
+            }
+
+            #ReceiptLine {
+                color: #cfcfcf;
+                background: #cfcfcf;
+                min-height: 1px;
+                max-height: 1px;
+                border: none;
+            }
+
+            #ReceiptText {
+                background: #ffffff;
+                border: none;
+                color: #111111;
+                padding: 4px;
+            }
+
+            #ReceiptBtn {
+                background: #f3f3f3;
+                border: 1px solid #cccccc;
+                border-radius: 5px;
+                padding: 7px;
+                font-size: 11px;
+                font-weight: 600;
+                color: #111111;
+            }
+
+            #ReceiptBtn:hover {
+                background: #e8e8e8;
+            }
+
+            #ReceiptBtn:pressed {
+                background: #dddddd;
+            }
+        """)
+
+    def apply_blur(self):
+        if self.main_parent and hasattr(self.main_parent, "panel") and self.main_parent.panel:
+            self.blur_effect = QGraphicsBlurEffect()
+            self.blur_effect.setBlurRadius(12)
+            self.main_parent.panel.setGraphicsEffect(self.blur_effect)
+
+    def remove_blur(self):
+        if self.main_parent and hasattr(self.main_parent, "panel") and self.main_parent.panel:
+            self.main_parent.panel.setGraphicsEffect(None)
+        self.blur_effect = None
+
+    def showEvent(self, event):
+        self.apply_blur()
+        super().showEvent(event)
+
+    def closeEvent(self, event):
+        self.remove_blur()
+        super().closeEvent(event)
+
+    def reject(self):
+        self.remove_blur()
+        super().reject()
+
+    def mousePressEvent(self, event):
+        if not self.card.geometry().contains(event.pos()):
+            self.close()
+        super().mousePressEvent(event)
+
+    def handle_print(self):
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageMargins(2, 2, 2, 2, QPrinter.Millimeter)
+
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec_() == QDialog.Accepted:
+            doc = QTextDocument()
+            doc.setDefaultFont(QFont("Courier New", 9))
+            html = f"""
+            <html>
+                <body style="
+                    font-family: 'Courier New', monospace;
+                    font-size: 9pt;
+                    white-space: pre;
+                    margin: 2px;
+                    color: black;
+                ">{self.receipt_text}</body>
+            </html>
+            """
+            doc.setHtml(html)
+            doc.print_(printer)
 
 
 class ReportDialog(QDialog):
@@ -233,9 +423,9 @@ class ReportDialog(QDialog):
         btnRow.setContentsMargins(0, 10, 0, 0)
         bodyLay.addLayout(btnRow)
 
-        self.printBtn = QPushButton("🖨 Print Receipt")
-        self.scanBtn = QPushButton("⟳ New Scan")
-        self.historyBtn = QPushButton("📊 View History")
+        self.printBtn = QPushButton(" Print Receipt")
+        self.scanBtn = QPushButton(" New Scan")
+        self.historyBtn = QPushButton(" View History")
 
         for btn in (self.printBtn, self.scanBtn, self.historyBtn):
             btn.setObjectName("ActionBtn")
@@ -259,8 +449,85 @@ class ReportDialog(QDialog):
         self.close()
         QTimer.singleShot(100, lambda: HistoryDialog(self.main_parent).exec_())
 
+    def build_receipt_text(self):
+        now = datetime.now()
+
+        date_text = now.strftime("%Y-%m-%d")
+        time_text = now.strftime("%H:%M:%S")
+
+        operator_text = self.operatorLabel.text().replace("Operator:", "").strip()
+        batch_text = self.batchLabel.text().replace("Batch:", "").strip()
+
+        batch_no = batch_text
+        if "-" in batch_text:
+            try:
+                batch_no = str(int(batch_text.split("-")[-1]))
+            except:
+                batch_no = batch_text
+
+        grade_num = self.gradeNumber.text().strip()
+        grade_text = f"Grade {grade_num}"
+
+        score_text = self.scoreValue.text().split("/")[0].strip()
+        try:
+            confidence_text = f"{float(score_text):.1f}%"
+        except:
+            confidence_text = score_text
+
+        moisture_raw = self.moistureValue.text().replace("%", "").strip()
+        moisture_1 = moisture_raw
+        moisture_2 = moisture_raw
+
+        raw_status = self.statusValue.text().strip().upper()
+        status_text = "Accepted" if "PASS" in raw_status else "Rejected"
+
+        recommendation_raw = self.recommendationLabel.text().replace("Recommendation:", "").strip()
+
+        cooking_time = recommendation_raw
+        if "min" not in recommendation_raw.lower():
+            if grade_num == "1":
+                cooking_time = "45-50 min"
+            elif grade_num == "2":
+                cooking_time = "50-55 min"
+            elif grade_num == "3":
+                cooking_time = "55-60 min"
+            else:
+                cooking_time = "Not recommended"
+
+        line = "-" * 32
+        top = "=" * 32
+
+        receipt_text = (
+            f"{top}\n"
+            f"   COPRA QUALITY ANALYSIS\n"
+            f"        SYSTEM RECEIPT\n"
+            f"{top}\n"
+            f"Date: {date_text}\n"
+            f"Operator: {operator_text}\n"
+            f"\n"
+            f"Time: {time_text}\n"
+            f"{line}\n"
+            f"Batch No: {batch_no}\n"
+            f"Grade: {grade_text}\n"
+            f"Confidence: {confidence_text}\n"
+            f"{line}\n"
+            f"Moisture Readings:\n"
+            f"  Sensor 1: {moisture_1}%\n"
+            f"  Sensor 2: {moisture_2}%\n"
+            f"{line}\n"
+            f"Status: {status_text}\n"
+            f"Recommendation:\n"
+            f"  Cooking Time: {cooking_time}\n"
+            f"{line}\n"
+            f"         Thank you!\n"
+            f"{top}"
+        )
+        return receipt_text
+
     def print_report(self):
-        print("Printing report...")
+        receipt_text = self.build_receipt_text()
+        dialog = ReceiptDialog(receipt_text, self)
+        dialog.exec_()
 
     def add_shadow(self):
         outer_shadow = QGraphicsDropShadowEffect(self)
