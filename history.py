@@ -68,10 +68,6 @@ class ScanCard(QFrame):
         gradeLabel.setAlignment(Qt.AlignCenter)
         root.addWidget(gradeLabel)
 
-
-# -----------------------------
-# BATCH DETAILS DIALOG
-# -----------------------------
 # -----------------------------
 # BATCH DETAILS DIALOG (grouped by grade)
 # -----------------------------
