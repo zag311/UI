@@ -35,4 +35,5 @@ def get_batch_images(batch_id):
             WHERE batch_id = ?
             ORDER BY captured_at ASC
         """, (batch_id,))
-        return [{"image": p, "grade": g} for p, g in cursor.fetchall()]
+        # Use key "image_path" so the UI finds it
+        return [{"image_path": p, "grade": g} for p, g in cursor.fetchall()]

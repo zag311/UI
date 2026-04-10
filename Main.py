@@ -1,7 +1,7 @@
 import sys
 import os
 import cv2
-# import tensorflow as tf
+import tensorflow as tf
 import numpy as np
 import serial
 import re
@@ -27,8 +27,8 @@ from history import HistoryDialog
 from report import ReportDialog
 
 # ===== Constants (Scaled down) =====
-MODEL_PATH = "/home/aldenrecharge/Desktop/Copra_AI/Copra_Final.tflite"
-CLASS_NAMES = ['G1', 'G2', 'G3', 'REJ', 'NOT']
+MODEL_PATH = "/home/aldenrecharge/Desktop/Raspberry/Copra_Final.tflite"
+CLASS_NAMES = ['G1', 'G2', 'G3', 'NOT', 'REJ']
 IMAGE_SIZE = (224, 224)
 PREVIEW_W = 360
 PREVIEW_H = 450
@@ -206,43 +206,73 @@ class CreamHeader(QLabel):
         self.setAlignment(Qt.AlignCenter)
 
 # ===== AI Thread =====
-# class AIWorker(QThread):
-#     result_ready = pyqtSignal(str, float)
+class AIWorker(QThread):
+    result_ready = pyqtSignal(str, float)
 
-#     def __init__(self, frame, interpreter, input_details, output_details):
-#         super().__init__()
-#         self.frame = frame.copy()
-#         self.interpreter = interpreter
-#         self.input_details = input_details
-#         self.output_details = output_details
+    def __init__(self, frame, interpreter, input_details, output_details):
+        super().__init__()
+        self.frame = frame.copy()
+        self.interpreter = interpreter
+        self.input_details = input_details
+        self.output_details = output_details
 
-#     def run(self):
-#         frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
-#         resized = cv2.resize(frame_rgb, IMAGE_SIZE)
-#         img_array = resized.astype(np.float32)
-#         img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
-#         img_array = np.expand_dims(img_array, axis=0)
+    def run(self):
+        frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+        resized = cv2.resize(frame_rgb, IMAGE_SIZE)
+        img_array = resized.astype(np.float32)
+        img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
+        img_array = np.expand_dims(img_array, axis=0)
 
-#         self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
-#         self.interpreter.invoke()
-#         output = self.interpreter.get_tensor(self.output_details[0]['index'])
+        self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
+        self.interpreter.invoke()
+        output = self.interpreter.get_tensor(self.output_details[0]['index'])
 
-#         idx = int(np.argmax(output))
-#         confidence = float(output[0][idx])
-#         label = CLASS_NAMES[idx]
-#         self.result_ready.emit(label, confidence)
+        idx = int(np.argmax(output))
+        confidence = float(output[0][idx])
+        label = CLASS_NAMES[idx]
+        print(label)
+        self.result_ready.emit(label, confidence)
 
 # ===== Main Window =====
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
 
-        # create_tables.init_db()
+        create_tables.init_db()
 
-        # self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
-        # self.camera_thread.frame_ready.connect(self.update_preview)
-        # self.camera_thread.start()
-        # self.camera_thread.camera_failed.connect(self.on_camera_failed)
+        # This exit button
+        self.cancel_button = QPushButton("Cancel", self)
+        self.cancel_button.setStyleSheet("""
+            QPushButton {
+                background-color: #c0392b;
+                color: white;
+                border-radius: 12px;
+                padding: 12px 24px;
+                font-size: 18px;
+                font-weight: bold;
+                min-width: 140px;
+            }
+            QPushButton:hover {
+                background-color: #e74c3c;
+            }
+        """)
+        self.cancel_button.clicked.connect(self.cancel_moisture_collection)
+        self.cancel_button.hide()
+
+        # This is Start Button
+        buttonLayout = QHBoxLayout()
+        buttonLayout.setSpacing(12)
+        self.startBtn = QPushButton("Start Collection")
+        self.startBtn.setObjectName("PrimaryBtn")
+        self.startBtn.setMinimumHeight(46)
+        self.startBtn.clicked.connect(self.start_moisture_collection)
+        buttonLayout.addWidget(self.startBtn)
+
+        # Updated Camera
+        self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
+        self.camera_thread.frame_ready.connect(self.update_preview)
+        self.camera_thread.start()
+        self.camera_thread.camera_failed.connect(self.on_camera_failed)
         self.moisture_samples = []
         self.arduino_grades = []  # new list to track grades
 
@@ -255,7 +285,7 @@ class MainWindow(QMainWindow):
 
         self.moisture_done = False
 
-        self.moisture_threshold = 8.0  # adjust based on your calibration
+        self.moisture_threshold = 6.0  # adjust based on your calibration
         self.moisture_samples = []
         self.required_samples = 5
 
@@ -263,17 +293,17 @@ class MainWindow(QMainWindow):
         self.awaiting_stable_reading = False
 
         # Load AI model
-        # self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-        # self.interpreter.allocate_tensors()
-        # self.input_details = self.interpreter.get_input_details()
-        # self.output_details = self.interpreter.get_output_details()
+        self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+        self.interpreter.allocate_tensors()
+        self.input_details = self.interpreter.get_input_details()
+        self.output_details = self.interpreter.get_output_details()
 
-        # self.ai_thread_running = False
-        # self.last_label = None
-        # self.stable_counter = 0
-        # self.STABLE_REQUIRED = 3
-        # self.MIN_CONFIDENCE = 0.80
-        # self.capture_cooldown = False
+        self.ai_thread_running = False
+        self.last_label = None
+        self.stable_counter = 0
+        self.STABLE_REQUIRED = 3
+        self.MIN_CONFIDENCE = 0.80
+        self.capture_cooldown = False
 
         # Serial
         try:
@@ -294,22 +324,22 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("Copra Quality Analysis System")
 
         # Camera
-        self.cam_index = 0
-        self.cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 400)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
-        self.cap.set(cv2.CAP_PROP_FPS, 30)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
-        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+        # self.cam_index = 0
+        # self.cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
+        # self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 400)
+        # self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 680)
+        # self.cap.set(cv2.CAP_PROP_FPS, 30)
+        # self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        # self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
         self.preview_timer = QTimer(self)
         self.preview_timer.timeout.connect(self.update_preview)
         self.is_running = False
         self.last_frame = None
 
-        # self.ai_timer = QTimer(self)
-        # self.ai_timer.setInterval(AI_READ_INTERVAL_MS)
-        # self.ai_timer.timeout.connect(self.do_ai_read)
+        self.ai_timer = QTimer(self)
+        self.ai_timer.setInterval(AI_READ_INTERVAL_MS)
+        self.ai_timer.timeout.connect(self.do_ai_read)
 
         self.powerHoldTimer = QTimer(self)
         self.powerHoldTimer.setSingleShot(True)
@@ -352,9 +382,9 @@ class MainWindow(QMainWindow):
         self.previewLabel.setAlignment(Qt.AlignCenter)
         self.previewLabel.setMinimumSize(280, 200)
         leftLay.addWidget(self.previewLabel, 0, Qt.AlignCenter)
-        if not self.cap.isOpened():
-            self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
-            self.previewLabel.setAlignment(Qt.AlignCenter)
+        # if not self.cap.isOpened():
+        #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+        #     self.previewLabel.setAlignment(Qt.AlignCenter)
 
         # CENTER Panel
         centerPanel = SoftPanel()
@@ -419,7 +449,7 @@ class MainWindow(QMainWindow):
         batchHead = BrownHeader("BATCH COUNT")
         batchHead.setFixedHeight(36)
         batchLay.addWidget(batchHead)
-        self.batchLabel = QLabel("BATCH 1: 26 COPRA")
+        self.batchLabel = QLabel("BATCH 1: 0 COPRA")
         self.batchLabel.setObjectName("BatchValueText")
         self.batchLabel.setAlignment(Qt.AlignCenter)
         batchLay.addWidget(self.batchLabel)
@@ -530,12 +560,23 @@ class MainWindow(QMainWindow):
         self.overlay_label = QLabel(self)
         self.overlay_label.setAlignment(Qt.AlignCenter)
         self.overlay_label.setStyleSheet("""
-            background-color: rgba(0, 0, 0, 180);
-            color: white;
-            font-size: 22px;
-            border-radius: 12px;
+            background-color: rgba(20, 20, 20, 200);
+            color: #FFFFFF;    
+            font-size: 28px;
+            font-weight: bold;
+            border-radius: 16px;
+            padding: 40px;
         """)
+        self.overlay_label.setGeometry(self.rect())
         self.overlay_label.hide()
+
+        # ✅ CREATE layout FIRST
+        self.overlay_layout = QVBoxLayout(self.overlay_label)
+        self.overlay_layout.setAlignment(Qt.AlignCenter)
+
+        # Push button toward bottom
+        self.overlay_layout.addStretch()
+        self.overlay_layout.addWidget(self.cancel_button, alignment=Qt.AlignCenter)
 
 
     def mouseDoubleClickEvent(self, event):
@@ -793,15 +834,15 @@ class MainWindow(QMainWindow):
             self.mainBtn.setObjectName("DangerBtn")
             self._repolish(self.mainBtn)
 
-            if self.cap:
-                self.preview_timer.start(CAM_FPS_MS)
-            else:
-                self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
-                self.previewLabel.setAlignment(Qt.AlignCenter)
+            # if self.cap:
+            #     self.preview_timer.start(CAM_FPS_MS)
+            # else:
+            #     self.previewLabel.setText("No camera detected.\nCheck webcam / permissions.")
+            #     self.previewLabel.setAlignment(Qt.AlignCenter)
 
-            # self.ai_timer.stop()
-            # QTimer.singleShot(AI_FIRST_READ_DELAY_MS, self.do_ai_read)
-            # self.ai_timer.start()
+            self.ai_timer.stop()
+            QTimer.singleShot(AI_FIRST_READ_DELAY_MS, self.do_ai_read)
+            self.ai_timer.start()
 
         else:
             self.is_running = False
@@ -810,7 +851,7 @@ class MainWindow(QMainWindow):
             self._repolish(self.mainBtn)
 
             self.preview_timer.stop()
-            # self.ai_timer.stop()
+            self.ai_timer.stop()
             self.confGauge.stop_animation()
 
             if self.last_frame is None:
@@ -819,30 +860,30 @@ class MainWindow(QMainWindow):
             else:
                 self._set_preview_from_bgr(self.last_frame)
                 # Temporary addition for testing purposes
-                self.auto_capture("GRADE 1", 1.0)
+                # self.auto_capture("GRADE 1", 1.0)
 
-    # def do_ai_read(self):
-    #     if not self.is_running or self.last_frame is None:
-    #         return
+    def do_ai_read(self):
+        if not self.is_running or self.last_frame is None:
+            return
         
-    #     if self.is_paused_for_measurement:
-    #         return
+        if self.is_paused_for_measurement:
+            return
         
-    #     if self.ai_thread_running:
-    #         return
+        if self.ai_thread_running:
+            return
 
-    #     self.ai_thread_running = True
+        self.ai_thread_running = True
 
-    #     self.ai_worker = AIWorker(
-    #         self.last_frame,
-    #         self.interpreter,
-    #         self.input_details,
-    #         self.output_details
-    #     )
+        self.ai_worker = AIWorker(
+            self.last_frame,
+            self.interpreter,
+            self.input_details,
+            self.output_details
+        )
 
-    #     self.ai_worker.result_ready.connect(self.handle_ai_result)
-    #     self.ai_worker.finished.connect(self.on_ai_finished)
-    #     self.ai_worker.start()
+        self.ai_worker.result_ready.connect(self.handle_ai_result)
+        self.ai_worker.finished.connect(self.on_ai_finished)
+        self.ai_worker.start()
 
     def _repolish(self, widget):
         widget.style().unpolish(widget)
@@ -879,15 +920,15 @@ class MainWindow(QMainWindow):
             self.confGauge.stop_animation()
         except Exception:
             pass
-        try:
-            if self.cap is not None:
-                self.cap.release()
-        except Exception:
-            pass
         # try:
-        #     self.camera_thread.stop()
+        #     if self.cap is not None:
+        #         self.cap.release()
         # except Exception:
         #     pass
+        try:
+            self.camera_thread.stop()
+        except Exception:
+            pass
         super().closeEvent(event)
 
     def on_ai_finished(self):
@@ -896,56 +937,60 @@ class MainWindow(QMainWindow):
         self.ai_worker = None
 
 
-    # def handle_ai_result(self, label, confidence):
-    #     confidence_percent = confidence * 100.0
-    #     self.confGauge.set_target(confidence_percent)
+    def handle_ai_result(self, label, confidence):
+        confidence_percent = confidence * 100.0
+        self.confGauge.set_target(confidence_percent)
 
-    #     # === Grade Mapping ===
-    #     grade_map = {
-    #         'G1': ("GRADE 1", "Clean and White to Pale Color", "✔ PASSED: READY TO SELL"),
-    #         'G2': ("GRADE 2", "Good Color and Acceptable Quality", "✔ PASSED: GOOD FOR MARKET"),
-    #         'G3': ("GRADE 3", "Needs Further Drying / Sorting", "⚠ NEEDS FURTHER PROCESS"),
-    #         'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY"),
-    #         'NOT': ("NON-COPRA", "Not a copra sample", "Ignored")
-    #     }
+        # === Grade Mapping ===
+        grade_map = {
+            'G1': ("GRADE 1", "Clean and White to Pale Color", "✔ PASSED: READY TO SELL"),
+            'G2': ("GRADE 2", "Good Color and Acceptable Quality", "✔ PASSED: GOOD FOR MARKET"),
+            'G3': ("GRADE 3", "Needs Further Drying / Sorting", "⚠ NEEDS FURTHER PROCESS"),
+            'REJ': ("REJECT", "Poor Quality and High Moisture", "✖ REJECTED: NOT READY"),
+            'NOT': ("NON-COPRA", "Not a copra sample", "Ignored")
+        }
 
-    #     grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
-    #     self.captured_label = grade
+        grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
+        self.captured_label = grade
 
-    #     # === UI Update (optional: still show NON-COPRA) ===
-    #     self.gradeValue.setText(grade)
-    #     self.colorNote.setText(note)
-    #     self.recommendation.setText(reco)
+        # === UI Update (optional: still show NON-COPRA) ===
+        self.gradeValue.setText(grade)
+        self.colorNote.setText(note)
+        self.recommendation.setText(reco)
 
-    #     # === 🚫 HARD FILTER ===
-    #     if label == "NOT":
-    #         self.stable_counter = 0
-    #         self.last_label = None
-    #         return  # 💀 kill the pipeline here
+        # === 🚫 HARD FILTER ===
+        if label == "NOT":
+            self.stable_counter = 0
+            self.last_label = None
+            return  # 💀 kill the pipeline here
 
-    #     # === Stability Logic (auto capture trigger) ===
-    #     if confidence >= self.MIN_CONFIDENCE:
-    #         if label == self.last_label:
-    #             self.stable_counter += 1
-    #         else:
-    #             self.stable_counter = 1
-    #             self.last_label = label
-    #     else:
-    #         self.stable_counter = 0
-    #         self.last_label = None
+        # === Stability Logic (auto capture trigger) ===
+        if confidence >= self.MIN_CONFIDENCE:
+            if label == self.last_label:
+                self.stable_counter += 1
+            else:
+                self.stable_counter = 1
+                self.last_label = label
+        else:
+            self.stable_counter = 0
+            self.last_label = None
 
-    #     if self.stable_counter >= self.STABLE_REQUIRED and not self.capture_cooldown:
-    #         self.capture_cooldown = True
-    #         self.auto_capture(label, confidence)
+        if self.stable_counter >= self.STABLE_REQUIRED and not self.capture_cooldown:
+            self.capture_cooldown = True
+            self.auto_capture(label, confidence)
 
     def process_moisture(self, moisture, grade=None):
         if self.moisture_done:
             return
 
+        self.startBtn.setEnabled(False)
         # Step 1: wait for threshold
-        if not self.moisture_samples and moisture < self.moisture_threshold:
-            self.show_overlay(f"Moisture: {moisture:.2f}%\nWaiting threshold...")
-            return
+        # if not self.moisture_samples and moisture < self.moisture_threshold:
+            # self.show_overlay(
+            #     f"Moisture: {moisture:.2f}%\nWaiting threshold...",
+            #     show_cancel=True
+            # )
+        #     return
 
         # Step 2: collect sample and optional grade
         self.moisture_samples.append(moisture)
@@ -961,7 +1006,8 @@ class MainWindow(QMainWindow):
         self.show_overlay(
             f"Moisture: {moisture:.2f}%\n"
             f"Samples: {len(self.moisture_samples)}/{self.required_samples}\n"
-            f"Current Grade Mode: {current_mode_grade}"
+            f"Current Grade Mode: {current_mode_grade}",
+            show_cancel=True
         )
 
         # Step 3: finalize if enough samples
@@ -973,8 +1019,13 @@ class MainWindow(QMainWindow):
             except StatisticsError:
                 moisture_final_grade = self.captured_label
 
-            self.show_overlay(f"Final Moisture:\n{avg_moisture:.2f}%\nFinal Moisture Grade: {moisture_final_grade}")
+            self.show_overlay(
+                f"Final Moisture:\n{avg_moisture:.2f}%\nFinal Moisture Grade: {moisture_final_grade}",
+                show_cancel=False
+            )
             QTimer.singleShot(1500, lambda: self.finish_capture(avg_moisture, moisture_final_grade))
+        
+        self.startBtn.setEnabled(True)
 
     def read_serial(self):
         if not self.ser or not self.serial_connected:
@@ -1015,9 +1066,9 @@ class MainWindow(QMainWindow):
         print("[SYSTEM] Finalizing capture")
 
         # Determine final grade as the worst between AI and moisture
-        # ai_grade = self.captured_label
+        ai_grade = self.captured_label
         # Temporary for testing
-        ai_grade = getattr(self, "captured_label", "GRADE 1")
+        # ai_grade = getattr(self, "captured_label", "GRADE 1")
         # Normalize both grades immediately
         normalized_ai_grade = {
             'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT', 'NOT': 'NON-COPRA',
@@ -1053,15 +1104,15 @@ class MainWindow(QMainWindow):
         print(f"[SAVED] {filepath} | Moisture Avg: {avg_moisture:.2f} | Final Grade: {final_grade_to_save}")
 
         # Save to DB
-        # try:
-        #     create_tables.save_image(
-        #         batch_id=self.current_batch_id,
-        #         image_path=filepath,
-        #         grade=final_grade_to_save
-        #     )
-        #     print("[DB] Capture saved successfully.")
-        # except Exception as e:
-        #     print("[DB ERROR]", e)
+        try:
+            create_tables.save_image(
+                batch_id=self.current_batch_id,
+                image_path=filepath,
+                grade=final_grade_to_save
+            )
+            print("[DB] Capture saved successfully.")
+        except Exception as e:
+            print("[DB ERROR]", e)
 
         # Update UI
         try:
@@ -1080,6 +1131,7 @@ class MainWindow(QMainWindow):
         self.arduino_grades.clear()
         QTimer.singleShot(3000, self.reset_capture_state)
         self.moisture_done = False
+        self.startBtn.setEnabled(True)
 
     def auto_capture(self, label, confidence):
         if self.last_frame is not None:
@@ -1090,7 +1142,6 @@ class MainWindow(QMainWindow):
         print("[AUTO] Capture triggered")
 
         # Save frame temporarily (DO NOT SAVE YET)
-        self.captured_frame = self.last_frame.copy()
         self.captured_label = label
         self.captured_confidence = confidence
 
@@ -1100,50 +1151,87 @@ class MainWindow(QMainWindow):
         self.moisture_samples.clear()
 
         # Show overlay
-        self.show_overlay("Waiting for moisture...")
+        self.show_overlay("Waiting for moisture...", show_cancel=True)  
 
-    def show_overlay(self, text):
+    def show_overlay(self, text, show_cancel=False):
         self.overlay_label.setText(text)
-
-        self.overlay_label.setGeometry(
-            self.width()//2 - 180,
-            self.height()//2 - 90,
-            360,
-            180
-        )
-
+        self.overlay_label.setGeometry(self.rect())  # keep it full screen
         self.overlay_label.show()
+
+        if show_cancel:
+            self.cancel_button.show()
+        else:
+            self.cancel_button.hide()
+
+    def cancel_moisture_collection(self):
+        print("[SYSTEM] Moisture collection cancelled")
+
+        self.moisture_samples.clear()
+        self.arduino_grades.clear()
+
+        self.awaiting_stable_reading = False
+        self.is_paused_for_measurement = False
+        self.moisture_done = True
+        self.startBtn.setEnabled(True)
+
+        self.show_overlay("Cancelled.", show_cancel=False)
+
+        QTimer.singleShot(800, self.overlay_label.hide)
+
+        # Allow system to run again
+        QTimer.singleShot(1000, self.reset_capture_state)
 
     def reset_capture_state(self):
         self.capture_cooldown = False
         self.stable_counter = 0
         self.last_label = None
 
-    # def update_preview(self, frame):
-    #     if frame is None:
+    def update_preview(self, frame):
+        if frame is None:
+            return
+
+        self.last_frame = frame.copy()  # 👈 prevent race condition
+        self._set_preview_from_bgr(frame)
+
+    def start_moisture_collection(self):
+        if self.awaiting_stable_reading:
+            return  # already collecting
+        
+        if self.last_frame is not None:
+            self.captured_frame = self.last_frame.copy()
+        else:
+            self.captured_frame = None
+        
+        self.captured_label = getattr(self, "captured_label", "GRADE 1")
+        self.captured_confidence = getattr(self, "captured_confidence", 1.0)
+        
+        # Prepare for manual moisture capture
+        self.is_paused_for_measurement = True
+        self.awaiting_stable_reading = True
+        self.moisture_samples.clear()
+        self.arduino_grades.clear()
+        
+        self.show_overlay("Waiting for moisture...", show_cancel=True)
+        self.startBtn.setEnabled(False)
+
+    # def update_preview(self):
+    #     if self.cap is None:
+    #         # No camera mode
+    #         self.previewLabel.setText("Camera Disabled")
+    #         self.previewLabel.setAlignment(Qt.AlignCenter)
     #         return
 
-    #     self.last_frame = frame.copy()  # 👈 prevent race condition
+    #     if not self.cap.isOpened():
+    #         self.previewLabel.setText("No camera detected")
+    #         self.previewLabel.setAlignment(Qt.AlignCenter)
+    #         return
+
+    #     ret, frame = self.cap.read()
+    #     if not ret or frame is None:
+    #         return
+
+    #     self.last_frame = frame.copy()
     #     self._set_preview_from_bgr(frame)
-
-    def update_preview(self):
-        if self.cap is None:
-            # No camera mode
-            self.previewLabel.setText("Camera Disabled")
-            self.previewLabel.setAlignment(Qt.AlignCenter)
-            return
-
-        if not self.cap.isOpened():
-            self.previewLabel.setText("No camera detected")
-            self.previewLabel.setAlignment(Qt.AlignCenter)
-            return
-
-        ret, frame = self.cap.read()
-        if not ret or frame is None:
-            return
-
-        self.last_frame = frame.copy()
-        self._set_preview_from_bgr(frame)
 
 def main():
     app = QApplication(sys.argv)
