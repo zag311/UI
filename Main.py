@@ -268,6 +268,24 @@ class MainWindow(QMainWindow):
         self.startBtn.clicked.connect(self.start_moisture_collection)
         buttonLayout.addWidget(self.startBtn)
 
+        self.overlay_start_button = QPushButton("Start Collection", self)
+        self.overlay_start_button.setStyleSheet("""
+            QPushButton {
+                background-color: #27ae60;
+                color: white;
+                border-radius: 12px;
+                padding: 12px 24px;
+                font-size: 18px;
+                font-weight: bold;
+                min-width: 140px;
+            }
+            QPushButton:hover {
+                background-color: #2ecc71;
+            }
+        """)
+        self.overlay_start_button.clicked.connect(self.start_moisture_collection)
+        self.overlay_start_button.hide()
+
         # Updated Camera
         self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
         self.camera_thread.frame_ready.connect(self.update_preview)
@@ -291,6 +309,7 @@ class MainWindow(QMainWindow):
 
         self.current_moisture = None
         self.awaiting_stable_reading = False
+        self.moisture_active = False
 
         # Load AI model
         self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
@@ -449,7 +468,7 @@ class MainWindow(QMainWindow):
         batchHead = BrownHeader("BATCH COUNT")
         batchHead.setFixedHeight(36)
         batchLay.addWidget(batchHead)
-        self.batchLabel = QLabel("BATCH 1: 0 COPRA")
+        self.batchLabel = QLabel("BATCH 1: 0 COPRA", self)
         self.batchLabel.setObjectName("BatchValueText")
         self.batchLabel.setAlignment(Qt.AlignCenter)
         batchLay.addWidget(self.batchLabel)
@@ -575,8 +594,16 @@ class MainWindow(QMainWindow):
         self.overlay_layout.setAlignment(Qt.AlignCenter)
 
         # Push button toward bottom
+        button_row = QHBoxLayout()
+        button_row.setSpacing(20)
+
+        button_row.addWidget(self.overlay_start_button)
+        button_row.addWidget(self.cancel_button)
+
         self.overlay_layout.addStretch()
-        self.overlay_layout.addWidget(self.cancel_button, alignment=Qt.AlignCenter)
+        self.overlay_layout.addLayout(button_row)
+
+        self.load_current_batch()
 
 
     def mouseDoubleClickEvent(self, event):
@@ -980,6 +1007,9 @@ class MainWindow(QMainWindow):
             self.auto_capture(label, confidence)
 
     def process_moisture(self, moisture, grade=None):
+        if not self.moisture_active:
+            return
+        
         if self.moisture_done:
             return
 
@@ -1004,15 +1034,15 @@ class MainWindow(QMainWindow):
             current_mode_grade = "-"
 
         self.show_overlay(
-            f"Moisture: {moisture:.2f}%\n"
-            f"Samples: {len(self.moisture_samples)}/{self.required_samples}\n"
-            f"Current Grade Mode: {current_mode_grade}",
-            show_cancel=True
+            f"Moisture: {moisture:.2f}%\nSamples: {len(self.moisture_samples)}/{self.required_samples}",
+            show_cancel=True,
+            show_start=False
         )
 
         # Step 3: finalize if enough samples
         if len(self.moisture_samples) >= self.required_samples:
             self.moisture_done = True
+            self.moisture_active = False
             avg_moisture = sum(self.moisture_samples) / len(self.moisture_samples)
             try:
                 moisture_final_grade = mode(self.arduino_grades) if self.arduino_grades else self.captured_label
@@ -1087,7 +1117,19 @@ class MainWindow(QMainWindow):
 
         base_dir = "/home/aldenrecharge/Desktop/Raspberry/images"
         batch_folder = os.path.join(base_dir, f"batch_{self.current_batch_id:03}")
-        os.makedirs(batch_folder, exist_ok=True)
+
+        # If batch folder doesn't exist OR is empty → create/use it
+        if not os.path.exists(batch_folder):
+            os.makedirs(batch_folder)
+
+        # Count current images BEFORE saving
+        existing_images = [
+            f for f in os.listdir(batch_folder)
+            if f.lower().endswith((".jpg", ".png"))
+        ]
+
+        # If folder exists but is empty → reuse it
+        # If it already has images → continue using same batch
 
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"{final_grade_to_save}_{int(self.captured_confidence*100)}_{timestamp}.jpg"
@@ -1115,13 +1157,8 @@ class MainWindow(QMainWindow):
             print("[DB ERROR]", e)
 
         # Update UI
-        try:
-            text = self.batchLabel.text()
-            num = int(text.split(":")[1].split()[0])
-            num += 1
-            self.batchLabel.setText(f"BATCH 1: {num} COPRA")
-        except:
-            pass
+        new_count = len(existing_images) + 1
+        self.update_batch_label(new_count)
 
         # Reset state
         self.overlay_label.hide()
@@ -1151,12 +1188,15 @@ class MainWindow(QMainWindow):
         self.moisture_samples.clear()
 
         # Show overlay
-        self.show_overlay("Waiting for moisture...", show_cancel=True)  
-
-    def show_overlay(self, text, show_cancel=False):
+        self.show_overlay("Ready for moisture check", show_cancel=True, show_start=True)
+        
+    def show_overlay(self, text, show_cancel=False, show_start=False):
         self.overlay_label.setText(text)
-        self.overlay_label.setGeometry(self.rect())  # keep it full screen
+        self.overlay_label.setGeometry(self.rect())
         self.overlay_label.show()
+
+        self.cancel_button.setVisible(show_cancel)
+        self.overlay_start_button.setVisible(show_start)
 
         if show_cancel:
             self.cancel_button.show()
@@ -1169,13 +1209,13 @@ class MainWindow(QMainWindow):
         self.moisture_samples.clear()
         self.arduino_grades.clear()
 
+        self.moisture_active = False
         self.awaiting_stable_reading = False
         self.is_paused_for_measurement = False
         self.moisture_done = True
         self.startBtn.setEnabled(True)
 
-        self.show_overlay("Cancelled.", show_cancel=False)
-
+        self.show_overlay("Final Moisture...", show_cancel=False, show_start=False)
         QTimer.singleShot(800, self.overlay_label.hide)
 
         # Allow system to run again
@@ -1194,25 +1234,63 @@ class MainWindow(QMainWindow):
         self._set_preview_from_bgr(frame)
 
     def start_moisture_collection(self):
-        if self.awaiting_stable_reading:
-            return  # already collecting
-        
+        if self.moisture_active:
+            return
+
+        self.moisture_active = True
+        self.moisture_done = False   # 🔥 important reset
+
         if self.last_frame is not None:
             self.captured_frame = self.last_frame.copy()
         else:
             self.captured_frame = None
-        
+
         self.captured_label = getattr(self, "captured_label", "GRADE 1")
         self.captured_confidence = getattr(self, "captured_confidence", 1.0)
-        
-        # Prepare for manual moisture capture
+
         self.is_paused_for_measurement = True
         self.awaiting_stable_reading = True
+
         self.moisture_samples.clear()
         self.arduino_grades.clear()
-        
+
         self.show_overlay("Waiting for moisture...", show_cancel=True)
         self.startBtn.setEnabled(False)
+
+    def load_current_batch(self):
+        base_dir = "/home/aldenrecharge/Desktop/Raspberry/images"
+
+        if not os.path.exists(base_dir):
+            os.makedirs(base_dir)
+            self.current_batch_id = 1
+            self.update_batch_label(0)
+            return
+
+        batches = [d for d in os.listdir(base_dir) if d.startswith("batch_")]
+
+        if not batches:
+            self.current_batch_id = 1
+            self.update_batch_label(0)
+            return
+
+        # Get latest batch
+        batches.sort(key=lambda x: int(x.split("_")[1]))
+        latest_batch = batches[-1]
+
+        self.current_batch_id = int(latest_batch.split("_")[1])
+
+        batch_path = os.path.join(base_dir, latest_batch)
+
+        # Count images
+        count = len([
+            f for f in os.listdir(batch_path)
+            if f.lower().endswith((".jpg", ".png"))
+        ])
+
+        self.update_batch_label(count)
+
+    def update_batch_label(self, count):
+        self.batchLabel.setText(f"BATCH {self.current_batch_id}: {count} COPRA")
 
     # def update_preview(self):
     #     if self.cap is None:
