@@ -4,220 +4,10 @@ from PyQt5.QtWidgets import (
     QDialog, QWidget, QFrame, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
     QGraphicsDropShadowEffect, QGraphicsBlurEffect,
-    QTextEdit
+    QTextEdit, QMessageBox, QScrollArea, QGridLayout
 )
 from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
 from datetime import datetime
-
-
-class MoistureBar(QWidget):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setMinimumSize(170, 16)
-        self.setMaximumHeight(16)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        self.setStyleSheet("""
-            QWidget {
-                background: qlineargradient(
-                    x1:0, y1:0, x2:1, y2:0,
-                    stop:0.00 #95a34a,
-                    stop:0.18 #b3bc59,
-                    stop:0.36 #cdbf62,
-                    stop:0.58 #d4a54f,
-                    stop:0.78 #bf7835,
-                    stop:1.00 #8e4f21
-                );
-                border: 1px solid #6f4b2a;
-                border-radius: 4px;
-            }
-        """)
-
-
-class ReceiptDialog(QDialog):
-    def __init__(self, receipt_text, parent=None):
-        super().__init__(parent)
-        self.receipt_text = receipt_text
-        self.main_parent = parent
-        self.blur_effect = None
-
-        self.setModal(True)
-        self.setFixedSize(300, 650)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
-        self.setAttribute(Qt.WA_TranslucentBackground)
-
-        outer = QVBoxLayout(self)
-        outer.setContentsMargins(12, 12, 12, 12)
-
-        self.card = QFrame()
-        self.card.setObjectName("ReceiptCard")
-        outer.addWidget(self.card)
-
-        shadow = QGraphicsDropShadowEffect(self)
-        shadow.setBlurRadius(24)
-        shadow.setOffset(0, 6)
-        shadow.setColor(QColor(0, 0, 0, 80))
-        self.card.setGraphicsEffect(shadow)
-
-        root = QVBoxLayout(self.card)
-        root.setContentsMargins(12, 12, 12, 12)
-        root.setSpacing(8)
-
-        self.logoLabel = QLabel("🧾")
-        self.logoLabel.setAlignment(Qt.AlignCenter)
-        self.logoLabel.setObjectName("ReceiptLogo")
-        root.addWidget(self.logoLabel)
-
-        self.headerLabel = QLabel("COPRA QUALITY ANALYSIS")
-        self.headerLabel.setAlignment(Qt.AlignCenter)
-        self.headerLabel.setObjectName("ReceiptHeader")
-        root.addWidget(self.headerLabel)
-
-        self.subHeaderLabel = QLabel("SYSTEM RECEIPT")
-        self.subHeaderLabel.setAlignment(Qt.AlignCenter)
-        self.subHeaderLabel.setObjectName("ReceiptSubHeader")
-        root.addWidget(self.subHeaderLabel)
-
-        line = QFrame()
-        line.setFrameShape(QFrame.HLine)
-        line.setObjectName("ReceiptLine")
-        root.addWidget(line)
-
-        self.textEdit = QTextEdit()
-        self.textEdit.setReadOnly(True)
-        self.textEdit.setObjectName("ReceiptText")
-        self.textEdit.setPlainText(receipt_text)
-        self.textEdit.setFont(QFont("Courier New", 9))
-        root.addWidget(self.textEdit, 1)
-
-        btnRow = QHBoxLayout()
-        btnRow.setSpacing(8)
-
-        self.printBtn = QPushButton("Print")
-        self.printBtn.setObjectName("ReceiptBtn")
-        self.printBtn.clicked.connect(self.handle_print)
-
-        self.closeBtn = QPushButton("Close")
-        self.closeBtn.setObjectName("ReceiptBtn")
-        self.closeBtn.clicked.connect(self.close)
-
-        btnRow.addWidget(self.printBtn)
-        btnRow.addWidget(self.closeBtn)
-        root.addLayout(btnRow)
-
-        self.setStyleSheet("""
-            QDialog {
-                background: rgba(0, 0, 0, 150);
-            }
-
-            #ReceiptCard {
-                background: #ffffff;
-                border-radius: 10px;
-                border: 1px solid #d8d8d8;
-            }
-
-            #ReceiptLogo {
-                font-size: 20px;
-                color: #111111;
-                background: transparent;
-            }
-
-            #ReceiptHeader {
-                font-size: 13px;
-                font-weight: 800;
-                color: #111111;
-                background: transparent;
-            }
-
-            #ReceiptSubHeader {
-                font-size: 11px;
-                font-weight: 700;
-                color: #333333;
-                background: transparent;
-            }
-
-            #ReceiptLine {
-                color: #cfcfcf;
-                background: #cfcfcf;
-                min-height: 1px;
-                max-height: 1px;
-                border: none;
-            }
-
-            #ReceiptText {
-                background: #ffffff;
-                border: none;
-                color: #111111;
-                padding: 4px;
-            }
-
-            #ReceiptBtn {
-                background: #f3f3f3;
-                border: 1px solid #cccccc;
-                border-radius: 5px;
-                padding: 7px;
-                font-size: 11px;
-                font-weight: 600;
-                color: #111111;
-            }
-
-            #ReceiptBtn:hover {
-                background: #e8e8e8;
-            }
-
-            #ReceiptBtn:pressed {
-                background: #dddddd;
-            }
-        """)
-
-    def apply_blur(self):
-        if self.main_parent and hasattr(self.main_parent, "panel") and self.main_parent.panel:
-            self.blur_effect = QGraphicsBlurEffect()
-            self.blur_effect.setBlurRadius(12)
-            self.main_parent.panel.setGraphicsEffect(self.blur_effect)
-
-    def remove_blur(self):
-        if self.main_parent and hasattr(self.main_parent, "panel") and self.main_parent.panel:
-            self.main_parent.panel.setGraphicsEffect(None)
-        self.blur_effect = None
-
-    def showEvent(self, event):
-        self.apply_blur()
-        super().showEvent(event)
-
-    def closeEvent(self, event):
-        self.remove_blur()
-        super().closeEvent(event)
-
-    def reject(self):
-        self.remove_blur()
-        super().reject()
-
-    def mousePressEvent(self, event):
-        if not self.card.geometry().contains(event.pos()):
-            self.close()
-        super().mousePressEvent(event)
-
-    def handle_print(self):
-        printer = QPrinter(QPrinter.HighResolution)
-        printer.setPageMargins(2, 2, 2, 2, QPrinter.Millimeter)
-
-        dialog = QPrintDialog(printer, self)
-        if dialog.exec_() == QDialog.Accepted:
-            doc = QTextDocument()
-            doc.setDefaultFont(QFont("Courier New", 9))
-            html = f"""
-            <html>
-                <body style="
-                    font-family: 'Courier New', monospace;
-                    font-size: 9pt;
-                    white-space: pre;
-                    margin: 2px;
-                    color: black;
-                ">{self.receipt_text}</body>
-            </html>
-            """
-            doc.setHtml(html)
-            doc.print_(printer)
 
 
 class ReportDialog(QDialog):
@@ -226,26 +16,33 @@ class ReportDialog(QDialog):
         self.main_parent = parent
         self.blur_effect = None
 
+        self.grade_counts = {
+            "g1": 20,
+            "g2": 30,
+            "g3": 20,
+            "reject": 10
+        }
+
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setModal(True)
         self.setAttribute(Qt.WA_TranslucentBackground)
-        self.resize(1280, 820)
+        self.resize(1360, 760)
 
         root = QVBoxLayout(self)
-        root.setContentsMargins(0, 0, 0, 0)
+        root.setContentsMargins(6, 6, 6, 6)
 
         self.panel = QFrame()
         self.panel.setObjectName("OuterCard")
         panelLay = QVBoxLayout(self.panel)
-        panelLay.setContentsMargins(0, 0, 0, 14)
+        panelLay.setContentsMargins(0, 0, 0, 10)
         panelLay.setSpacing(0)
 
         # HEADER
         headerWrap = QFrame()
         headerWrap.setObjectName("HeaderWrap")
         headerLay = QHBoxLayout(headerWrap)
-        headerLay.setContentsMargins(18, 0, 12, 0)
-        headerLay.setSpacing(10)
+        headerLay.setContentsMargins(18, 0, 10, 0)
+        headerLay.setSpacing(8)
 
         self.header = QLabel("COPRA GRADING MACHINE")
         self.header.setObjectName("HeaderBar")
@@ -253,7 +50,7 @@ class ReportDialog(QDialog):
 
         self.closeBtn = QPushButton("×")
         self.closeBtn.setObjectName("TopCloseBtn")
-        self.closeBtn.setFixedSize(40, 40)
+        self.closeBtn.setFixedSize(34, 34)
         self.closeBtn.clicked.connect(self.close)
 
         headerLay.addStretch(1)
@@ -267,15 +64,16 @@ class ReportDialog(QDialog):
         infoWrap = QFrame()
         infoWrap.setObjectName("InfoWrap")
         infoLay = QHBoxLayout(infoWrap)
-        infoLay.setContentsMargins(18, 10, 18, 8)
+        infoLay.setContentsMargins(14, 8, 14, 8)
         infoLay.setSpacing(10)
 
         self.dateLabel = QLabel("Date: Mar 14, 2026")
         self.timeLabel = QLabel("Time: 10:42 AM")
         self.operatorLabel = QLabel("Operator: John D.")
 
-        for lbl in (self.dateLabel, self.timeLabel, self.operatorLabel):
-            lbl.setObjectName("TopInfo")
+        self.dateLabel.setObjectName("TopInfo")
+        self.timeLabel.setObjectName("TopInfo")
+        self.operatorLabel.setObjectName("TopInfo")
 
         sep = QLabel("|")
         sep.setObjectName("TopSep")
@@ -284,30 +82,37 @@ class ReportDialog(QDialog):
         infoLay.addWidget(sep)
         infoLay.addWidget(self.timeLabel)
         infoLay.addStretch(1)
-        infoLay.addWidget(self.operatorLabel)
+        infoLay.addWidget(self.operatorLabel, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         panelLay.addWidget(infoWrap)
 
-        # BODY
-        bodyWrap = QFrame()
-        bodyWrap.setObjectName("BodyArea")
-        bodyLay = QVBoxLayout(bodyWrap)
-        bodyLay.setContentsMargins(14, 8, 14, 0)
-        bodyLay.setSpacing(12)
-        panelLay.addWidget(bodyWrap, 1)
+        # MAIN CONTENT AREA
+        mainWrap = QFrame()
+        mainWrap.setObjectName("MainWrap")
+        mainLay = QHBoxLayout(mainWrap)
+        mainLay.setContentsMargins(10, 0, 10, 0)
+        mainLay.setSpacing(8)
+        panelLay.addWidget(mainWrap, 1)
 
-        # RESULT CARD
+        # LEFT SIDE
+        leftPanel = QFrame()
+        leftPanel.setObjectName("LeftPanel")
+        leftLay = QVBoxLayout(leftPanel)
+        leftLay.setContentsMargins(0, 0, 0, 0)
+        leftLay.setSpacing(10)
+        mainLay.addWidget(leftPanel, 5)
+
         self.resultCard = QFrame()
         self.resultCard.setObjectName("ResultCard")
         self.resultCard.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         card = QVBoxLayout(self.resultCard)
-        card.setContentsMargins(24, 16, 24, 20)
-        card.setSpacing(16)
-        bodyLay.addWidget(self.resultCard, 1)
+        card.setContentsMargins(14, 10, 14, 14)
+        card.setSpacing(10)
+        leftLay.addWidget(self.resultCard, 1)
 
         # TITLE
         titleRow = QHBoxLayout()
-        titleRow.setSpacing(16)
+        titleRow.setSpacing(14)
 
         leftLine = QFrame()
         leftLine.setObjectName("TitleLine")
@@ -326,14 +131,15 @@ class ReportDialog(QDialog):
         titleRow.addWidget(rightLine, 1)
         card.addLayout(titleRow)
 
-        # MAIN CONTENT
+        # BODY
         contentRow = QHBoxLayout()
-        contentRow.setSpacing(40)
+        contentRow.setSpacing(18)
         card.addLayout(contentRow, 1)
 
-        # LEFT SIDE
+        # LEFT TEXT CONTENT
         leftCol = QVBoxLayout()
-        leftCol.setSpacing(16)
+        leftCol.setContentsMargins(10, 18, 0, 10)
+        leftCol.setSpacing(8)
         contentRow.addLayout(leftCol, 5)
 
         leftCol.addStretch(1)
@@ -342,49 +148,47 @@ class ReportDialog(QDialog):
         self.batchLabel.setObjectName("MainText")
         leftCol.addWidget(self.batchLabel)
 
-        scoreRow = QHBoxLayout()
-        scoreRow.setSpacing(8)
-        scoreText = QLabel("Quality Score:")
-        scoreText.setObjectName("MainText")
-        self.scoreValue = QLabel("89 / 100")
-        self.scoreValue.setObjectName("BoldValue")
-        scoreRow.addWidget(scoreText)
-        scoreRow.addWidget(self.scoreValue)
-        scoreRow.addStretch(1)
-        leftCol.addLayout(scoreRow)
+        self.gradeLabel = QLabel("Grade:")
+        self.gradeLabel.setObjectName("MainTextSoft")
+        leftCol.addWidget(self.gradeLabel)
 
-        moistureRow = QHBoxLayout()
-        moistureRow.setSpacing(10)
-        moistureText = QLabel("Moisture Level:")
-        moistureText.setObjectName("MainText")
-        self.moistureValue = QLabel("12.4%")
-        self.moistureValue.setObjectName("MainText")
-        self.moistureBar = MoistureBar()
-        moistureRow.addWidget(moistureText, 0)
-        moistureRow.addWidget(self.moistureValue, 0)
-        moistureRow.addWidget(self.moistureBar, 1)
-        leftCol.addLayout(moistureRow)
+        # GRADE GRID
+        self.gradeGridWrap = QFrame()
+        self.gradeGridWrap.setObjectName("GradeGridWrap")
+        gradeGrid = QGridLayout(self.gradeGridWrap)
+        gradeGrid.setContentsMargins(0, 0, 0, 0)
+        gradeGrid.setHorizontalSpacing(26)
+        gradeGrid.setVerticalSpacing(4)
 
-        statusRow = QHBoxLayout()
-        statusRow.setSpacing(8)
-        statusText = QLabel("Status:")
-        statusText.setObjectName("MainText")
-        self.statusValue = QLabel("✔ PASSED")
-        self.statusValue.setObjectName("StatusPass")
-        statusRow.addWidget(statusText)
-        statusRow.addWidget(self.statusValue)
-        statusRow.addStretch(1)
-        leftCol.addLayout(statusRow)
+        self.g1Label = QLabel("1 = 20pcs")
+        self.g1Label.setObjectName("MainTextSoft")
 
-        self.recommendationLabel = QLabel("Recommendation: Ready for storage and selling")
+        self.g3Label = QLabel("3 = 20pcs")
+        self.g3Label.setObjectName("MainTextSoft")
+
+        self.g2Label = QLabel("2 = 30pcs")
+        self.g2Label.setObjectName("MainTextSoft")
+
+        self.rejectLabel = QLabel("Rejects = 10pcs")
+        self.rejectLabel.setObjectName("MainTextSoft")
+
+        gradeGrid.addWidget(self.g1Label, 0, 0)
+        gradeGrid.addWidget(self.g3Label, 0, 1)
+        gradeGrid.addWidget(self.g2Label, 1, 0)
+        gradeGrid.addWidget(self.rejectLabel, 1, 1)
+
+        leftCol.addWidget(self.gradeGridWrap)
+
+        self.recommendationLabel = QLabel("Recommendation: Ready for storage and\nselling")
         self.recommendationLabel.setObjectName("MainText")
         self.recommendationLabel.setWordWrap(True)
         leftCol.addWidget(self.recommendationLabel)
 
         leftCol.addStretch(1)
 
-        # RIGHT SIDE
+        # RIGHT GRADE CARD
         rightCol = QVBoxLayout()
+        rightCol.setContentsMargins(0, 8, 8, 8)
         rightCol.setSpacing(0)
         contentRow.addLayout(rightCol, 4)
 
@@ -392,18 +196,18 @@ class ReportDialog(QDialog):
 
         self.gradeCard = QFrame()
         self.gradeCard.setObjectName("GradeCard")
-        self.gradeCard.setMinimumSize(280, 185)
-        self.gradeCard.setMaximumSize(320, 210)
+        self.gradeCard.setMinimumSize(250, 165)
+        self.gradeCard.setMaximumSize(300, 190)
         self.gradeCard.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
 
         gradeLay = QVBoxLayout(self.gradeCard)
-        gradeLay.setContentsMargins(18, 16, 18, 16)
+        gradeLay.setContentsMargins(18, 14, 18, 14)
         gradeLay.setSpacing(8)
 
         self.gradeTag = QLabel("GRADE A")
         self.gradeTag.setObjectName("GradeTag")
         self.gradeTag.setAlignment(Qt.AlignCenter)
-        self.gradeTag.setFixedHeight(46)
+        self.gradeTag.setFixedHeight(40)
 
         self.gradeNumber = QLabel("1")
         self.gradeNumber.setObjectName("GradeNumber")
@@ -419,25 +223,77 @@ class ReportDialog(QDialog):
 
         # BUTTONS
         btnRow = QHBoxLayout()
-        btnRow.setSpacing(12)
-        btnRow.setContentsMargins(0, 10, 0, 0)
-        bodyLay.addLayout(btnRow)
+        btnRow.setSpacing(10)
+        btnRow.setContentsMargins(0, 0, 0, 0)
+        leftLay.addLayout(btnRow)
 
-        self.printBtn = QPushButton(" Print Receipt")
-        self.scanBtn = QPushButton(" New Scan")
-        self.historyBtn = QPushButton(" View History")
+        self.printBtn = QPushButton("Print Receipt")
+        self.scanBtn = QPushButton("New Scan")
+        self.historyBtn = QPushButton("View History")
 
         for btn in (self.printBtn, self.scanBtn, self.historyBtn):
             btn.setObjectName("ActionBtn")
-            btn.setMinimumHeight(42)
+            btn.setMinimumHeight(38)
             btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
             btnRow.addWidget(btn)
+
+        # RIGHT SIDE - RECEIPT PANEL
+        self.receiptPanel = QFrame()
+        self.receiptPanel.setObjectName("ReceiptPanel")
+        receiptPanelLay = QVBoxLayout(self.receiptPanel)
+        receiptPanelLay.setContentsMargins(10, 10, 10, 10)
+        receiptPanelLay.setSpacing(8)
+        mainLay.addWidget(self.receiptPanel, 1)
+
+        self.receiptLogo = QLabel("🧾")
+        self.receiptLogo.setObjectName("ReceiptLogo")
+        self.receiptLogo.setAlignment(Qt.AlignCenter)
+
+        self.receiptHeader = QLabel("COPRA QUALITY ANALYSIS")
+        self.receiptHeader.setObjectName("ReceiptHeader")
+        self.receiptHeader.setAlignment(Qt.AlignCenter)
+
+        self.receiptSubHeader = QLabel("SYSTEM RECEIPT")
+        self.receiptSubHeader.setObjectName("ReceiptSubHeader")
+        self.receiptSubHeader.setAlignment(Qt.AlignCenter)
+
+        self.receiptLine = QFrame()
+        self.receiptLine.setObjectName("ReceiptLine")
+        self.receiptLine.setFrameShape(QFrame.HLine)
+
+        receiptPanelLay.addWidget(self.receiptLogo)
+        receiptPanelLay.addWidget(self.receiptHeader)
+        receiptPanelLay.addWidget(self.receiptSubHeader)
+        receiptPanelLay.addWidget(self.receiptLine)
+
+        self.receiptScroll = QScrollArea()
+        self.receiptScroll.setWidgetResizable(True)
+        self.receiptScroll.setFrameShape(QFrame.NoFrame)
+        self.receiptScroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.receiptContent = QWidget()
+        self.receiptContentLay = QVBoxLayout(self.receiptContent)
+        self.receiptContentLay.setContentsMargins(0, 0, 0, 0)
+        self.receiptContentLay.setSpacing(0)
+
+        self.receiptText = QTextEdit()
+        self.receiptText.setReadOnly(True)
+        self.receiptText.setObjectName("ReceiptText")
+        self.receiptText.setFont(QFont("Courier New", 9))
+        self.receiptText.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        self.receiptText.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        self.receiptContentLay.addWidget(self.receiptText)
+        self.receiptScroll.setWidget(self.receiptContent)
+        receiptPanelLay.addWidget(self.receiptScroll, 1)
 
         root.addWidget(self.panel)
 
         self.apply_styles()
         self.add_shadow()
         self.setup_connections()
+        self.refresh_grade_summary()
+        self.refresh_receipt_preview()
 
     def setup_connections(self):
         self.scanBtn.clicked.connect(self.close)
@@ -449,11 +305,106 @@ class ReportDialog(QDialog):
         self.close()
         QTimer.singleShot(100, lambda: HistoryDialog(self.main_parent).exec_())
 
+    def refresh_grade_summary(self):
+        self.g1Label.setText(f"1 = {self.grade_counts['g1']}pcs")
+        self.g2Label.setText(f"2 = {self.grade_counts['g2']}pcs")
+        self.g3Label.setText(f"3 = {self.grade_counts['g3']}pcs")
+        self.rejectLabel.setText(f"Rejects = {self.grade_counts['reject']}pcs")
+
+    def set_batch(self, batch_text):
+        self.batchLabel.setText(f"Batch: {batch_text}")
+        self.refresh_receipt_preview()
+
+    def set_recommendation(self, recommendation_text):
+        if not recommendation_text.startswith("Recommendation:"):
+            recommendation_text = f"Recommendation: {recommendation_text}"
+        self.recommendationLabel.setText(recommendation_text)
+        self.refresh_receipt_preview()
+
+    def set_grade(self, grade_number, grade_tag=None):
+        self.gradeNumber.setText(str(grade_number))
+        if grade_tag is None:
+            grade_tag = f"GRADE {chr(64 + int(grade_number))}" if str(grade_number).isdigit() and 1 <= int(grade_number) <= 26 else "GRADE"
+        self.gradeTag.setText(grade_tag)
+        self.refresh_receipt_preview()
+
+    def set_operator(self, operator_name):
+        self.operatorLabel.setText(f"Operator: {operator_name}")
+        self.refresh_receipt_preview()
+
+    def set_date_time(self, date_text=None, time_text=None):
+        if date_text:
+            self.dateLabel.setText(f"Date: {date_text}")
+        if time_text:
+            self.timeLabel.setText(f"Time: {time_text}")
+        self.refresh_receipt_preview()
+
+    def set_grade_counts(self, g1=0, g2=0, g3=0, reject=0):
+        self.grade_counts["g1"] = g1
+        self.grade_counts["g2"] = g2
+        self.grade_counts["g3"] = g3
+        self.grade_counts["reject"] = reject
+        self.refresh_grade_summary()
+        self.refresh_receipt_preview()
+
+    def update_report_data(
+        self,
+        batch=None,
+        recommendation=None,
+        grade_number=None,
+        grade_tag=None,
+        operator=None,
+        date_text=None,
+        time_text=None,
+        g1=None,
+        g2=None,
+        g3=None,
+        reject=None
+    ):
+        if batch is not None:
+            self.batchLabel.setText(f"Batch: {batch}")
+
+        if recommendation is not None:
+            recommendation_str = str(recommendation)
+            if not recommendation_str.startswith("Recommendation:"):
+                recommendation_str = f"Recommendation: {recommendation_str}"
+            self.recommendationLabel.setText(recommendation_str)
+
+        if grade_number is not None:
+            self.gradeNumber.setText(str(grade_number))
+
+        if grade_tag is not None:
+            self.gradeTag.setText(str(grade_tag))
+
+        if operator is not None:
+            self.operatorLabel.setText(f"Operator: {operator}")
+
+        if date_text is not None:
+            self.dateLabel.setText(f"Date: {date_text}")
+
+        if time_text is not None:
+            self.timeLabel.setText(f"Time: {time_text}")
+
+        if g1 is not None:
+            self.grade_counts["g1"] = g1
+        if g2 is not None:
+            self.grade_counts["g2"] = g2
+        if g3 is not None:
+            self.grade_counts["g3"] = g3
+        if reject is not None:
+            self.grade_counts["reject"] = reject
+
+        self.refresh_grade_summary()
+        self.refresh_receipt_preview()
+
     def build_receipt_text(self):
         now = datetime.now()
 
-        date_text = now.strftime("%Y-%m-%d")
-        time_text = now.strftime("%H:%M:%S")
+        date_label_text = self.dateLabel.text().replace("Date:", "").strip()
+        time_label_text = self.timeLabel.text().replace("Time:", "").strip()
+
+        date_text = now.strftime("%Y-%m-%d") if not date_label_text else date_label_text
+        time_text = now.strftime("%H:%M:%S") if not time_label_text else time_label_text
 
         operator_text = self.operatorLabel.text().replace("Operator:", "").strip()
         batch_text = self.batchLabel.text().replace("Batch:", "").strip()
@@ -468,31 +419,12 @@ class ReportDialog(QDialog):
         grade_num = self.gradeNumber.text().strip()
         grade_text = f"Grade {grade_num}"
 
-        score_text = self.scoreValue.text().split("/")[0].strip()
-        try:
-            confidence_text = f"{float(score_text):.1f}%"
-        except:
-            confidence_text = score_text
-
-        moisture_raw = self.moistureValue.text().replace("%", "").strip()
-        moisture_1 = moisture_raw
-        moisture_2 = moisture_raw
-
-        raw_status = self.statusValue.text().strip().upper()
-        status_text = "Accepted" if "PASS" in raw_status else "Rejected"
-
-        recommendation_raw = self.recommendationLabel.text().replace("Recommendation:", "").strip()
-
-        cooking_time = recommendation_raw
-        if "min" not in recommendation_raw.lower():
-            if grade_num == "1":
-                cooking_time = "45-50 min"
-            elif grade_num == "2":
-                cooking_time = "50-55 min"
-            elif grade_num == "3":
-                cooking_time = "55-60 min"
-            else:
-                cooking_time = "Not recommended"
+        confidence_map = {
+            "1": "89.0%",
+            "2": "80.0%",
+            "3": "70.0%"
+        }
+        confidence_text = confidence_map.get(grade_num, "0.0%")
 
         line = "-" * 32
         top = "=" * 32
@@ -512,28 +444,61 @@ class ReportDialog(QDialog):
             f"Confidence: {confidence_text}\n"
             f"{line}\n"
             f"Moisture Readings:\n"
-            f"  Sensor 1: {moisture_1}%\n"
-            f"  Sensor 2: {moisture_2}%\n"
+            f"  Sensor 1: 12.4%\n"
+            f"  Sensor 2: 12.4%\n"
             f"{line}\n"
-            f"Status: {status_text}\n"
+            f"Status: Accepted\n"
             f"Recommendation:\n"
-            f"  Cooking Time: {cooking_time}\n"
+            f"  Cooking Time: 45-50 min\n"
             f"{line}\n"
             f"         Thank you!\n"
             f"{top}"
         )
         return receipt_text
 
+    def refresh_receipt_preview(self):
+        self.receiptText.setPlainText(self.build_receipt_text())
+
     def print_report(self):
-        receipt_text = self.build_receipt_text()
-        dialog = ReceiptDialog(receipt_text, self)
-        dialog.exec_()
+        self.refresh_receipt_preview()
+
+        reply = QMessageBox.question(
+            self,
+            "Print Receipt",
+            "Do you want to print the receipt?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes
+        )
+
+        if reply != QMessageBox.Yes:
+            return
+
+        printer = QPrinter(QPrinter.HighResolution)
+        printer.setPageMargins(2, 2, 2, 2, QPrinter.Millimeter)
+
+        dialog = QPrintDialog(printer, self)
+        if dialog.exec_() == QDialog.Accepted:
+            doc = QTextDocument()
+            doc.setDefaultFont(QFont("Courier New", 9))
+            html = f"""
+            <html>
+                <body style="
+                    font-family: 'Courier New', monospace;
+                    font-size: 9pt;
+                    white-space: pre;
+                    margin: 2px;
+                    color: black;
+                ">{self.build_receipt_text()}</body>
+            </html>
+            """
+            doc.setHtml(html)
+            doc.print_(printer)
 
     def add_shadow(self):
         outer_shadow = QGraphicsDropShadowEffect(self)
-        outer_shadow.setBlurRadius(36)
-        outer_shadow.setOffset(0, 10)
-        outer_shadow.setColor(QColor(65, 40, 18, 60))
+        outer_shadow.setBlurRadius(28)
+        outer_shadow.setOffset(0, 8)
+        outer_shadow.setColor(QColor(65, 40, 18, 55))
         self.panel.setGraphicsEffect(outer_shadow)
 
     def apply_blur(self):
@@ -549,6 +514,8 @@ class ReportDialog(QDialog):
 
     def showEvent(self, event):
         self.apply_blur()
+        self.refresh_grade_summary()
+        self.refresh_receipt_preview()
         super().showEvent(event)
 
     def closeEvent(self, event):
@@ -559,11 +526,6 @@ class ReportDialog(QDialog):
         self.remove_blur()
         super().reject()
 
-    def mousePressEvent(self, event):
-        if not self.panel.geometry().contains(event.pos()):
-            self.close()
-        super().mousePressEvent(event)
-
     def apply_styles(self):
         self.setStyleSheet("""
             QDialog {
@@ -571,27 +533,27 @@ class ReportDialog(QDialog):
             }
 
             #OuterCard {
-                background: #f3ebe2;
-                border: 1px solid #d8c8b9;
+                background: #ece7e0;
+                border: 1px solid #d4c6b6;
                 border-radius: 18px;
             }
 
             #HeaderWrap {
                 background: qlineargradient(
-                    x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #805834,
-                    stop:1 #6c4827
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #7a552f,
+                    stop:1 #6b4724
                 );
                 border-top-left-radius: 18px;
                 border-top-right-radius: 18px;
-                min-height: 44px;
-                max-height: 44px;
+                min-height: 38px;
+                max-height: 38px;
             }
 
             #HeaderBar {
                 color: #f8efdf;
                 font-family: Georgia;
-                font-size: 22px;
+                font-size: 18px;
                 font-weight: 700;
                 letter-spacing: 1px;
                 background: transparent;
@@ -599,118 +561,113 @@ class ReportDialog(QDialog):
 
             #TopCloseBtn {
                 color: #fff4e3;
-                font-size: 24px;
+                font-size: 22px;
                 font-weight: 900;
-                background: transparent;
+                background: rgba(255,255,255,20);
                 border: none;
-                border-radius: 8px;
+                border-radius: 6px;
             }
 
-            #TopCloseBtn:pressed {
-                background: rgba(255, 255, 255, 30);
+            #TopCloseBtn:hover {
+                background: rgba(255,255,255,35);
             }
 
             #InfoWrap {
                 background: transparent;
+                border-bottom: 1px solid #d8cdbf;
             }
 
             #TopInfo {
-                color: #4c2e18;
+                color: #53341c;
                 font-family: Georgia;
-                font-size: 14px;
-                font-weight: 600;
+                font-size: 13px;
+                font-weight: 700;
                 background: transparent;
             }
 
             #TopSep {
-                color: #baa18b;
-                font-size: 14px;
+                color: #9c856c;
+                font-size: 13px;
                 background: transparent;
             }
 
-            #BodyArea {
+            #MainWrap {
+                background: transparent;
+            }
+
+            #LeftPanel {
                 background: transparent;
             }
 
             #ResultCard {
-                background: #f8f3ed;
-                border: 2px solid #d7c8bb;
+                background: #f6f2ed;
+                border: 2px solid #d6c8bb;
                 border-radius: 10px;
             }
 
             #ResultTitle {
-                color: #6a3e1d;
+                color: #744925;
                 font-family: Georgia;
-                font-size: 28px;
+                font-size: 24px;
                 font-weight: 700;
-                letter-spacing: 1px;
                 background: transparent;
                 padding-left: 10px;
                 padding-right: 10px;
             }
 
             #TitleLine {
-                background: #d9cabd;
+                background: #d7cbc0;
                 border: none;
             }
 
             #MainText {
-                color: #4d2b15;
+                color: #55331b;
                 font-family: Georgia;
-                font-size: 20px;
-                font-weight: 600;
-                background: transparent;
-            }
-
-            #BoldValue {
-                color: #4d2b15;
-                font-family: Georgia;
-                font-size: 20px;
+                font-size: 22px;
                 font-weight: 700;
                 background: transparent;
             }
 
-            #StatusPass {
-                color: #6b641f;
+            #MainTextSoft {
+                color: #55331b;
                 font-family: Georgia;
-                font-size: 20px;
-                font-weight: 700;
+                font-size: 19px;
+                font-weight: 500;
                 background: transparent;
+            }
+
+            #GradeGridWrap {
+                background: transparent;
+                border: none;
             }
 
             #GradeCard {
                 background: qlineargradient(
                     x1:0, y1:0, x2:1, y2:1,
-                    stop:0 #805126,
-                    stop:0.45 #b07a42,
-                    stop:1 #8b5929
+                    stop:0 #9f6f39,
+                    stop:1 #b88445
                 );
-                border: 2px solid #a97a49;
-                border-radius: 20px;
+                border: 2px solid #ad7f49;
+                border-radius: 18px;
             }
 
             #GradeTag {
                 color: #f9edd9;
                 font-family: Georgia;
-                font-size: 22px;
+                font-size: 20px;
                 font-weight: 700;
-                letter-spacing: 1px;
-                background: qlineargradient(
-                    x1:0, y1:0, x2:0, y2:1,
-                    stop:0 #86572d,
-                    stop:1 #714921
-                );
-                border: 2px solid #bf9463;
-                border-radius: 11px;
-                padding: 2px 16px;
-                min-width: 135px;
-                max-width: 165px;
+                background: rgba(115, 74, 32, 140);
+                border: 2px solid #c69a61;
+                border-radius: 10px;
+                padding: 2px 12px;
+                min-width: 120px;
+                max-width: 145px;
             }
 
             #GradeNumber {
                 color: #fff2dd;
                 font-family: Georgia;
-                font-size: 88px;
+                font-size: 78px;
                 font-weight: 700;
                 background: transparent;
             }
@@ -718,7 +675,7 @@ class ReportDialog(QDialog):
             #ActionBtn {
                 color: #f8ecd9;
                 font-family: Georgia;
-                font-size: 15px;
+                font-size: 14px;
                 font-weight: 700;
                 background: qlineargradient(
                     x1:0, y1:0, x2:0, y2:1,
@@ -730,7 +687,120 @@ class ReportDialog(QDialog):
                 padding: 8px 14px;
             }
 
+            #ActionBtn:hover {
+                background: #7a522d;
+            }
+
             #ActionBtn:pressed {
                 background: #5e3c1f;
             }
+
+            #ReceiptPanel {
+                background: #f2f2f2;
+                border: 1px solid #d4d4d4;
+                border-radius: 12px;
+            }
+
+            #ReceiptLogo {
+                font-size: 18px;
+                color: #444444;
+                background: transparent;
+            }
+
+            #ReceiptHeader {
+                font-size: 13px;
+                font-weight: 800;
+                color: #333333;
+                background: transparent;
+            }
+
+            #ReceiptSubHeader {
+                font-size: 11px;
+                font-weight: 700;
+                color: #555555;
+                background: transparent;
+            }
+
+            #ReceiptLine {
+                color: #d0d0d0;
+                background: #d0d0d0;
+                min-height: 1px;
+                max-height: 1px;
+                border: none;
+            }
+
+            #ReceiptText {
+                background: #f2f2f2;
+                border: none;
+                color: #222222;
+                padding: 4px;
+            }
+
+            QScrollArea {
+                background: transparent;
+                border: none;
+            }
+
+            QScrollBar:vertical {
+                background: transparent;
+                width: 8px;
+                margin: 0px;
+            }
+
+            QScrollBar::handle:vertical {
+                background: #c6c6c6;
+                border-radius: 4px;
+                min-height: 20px;
+            }
+
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0px;
+            }
+
+            QMessageBox {
+                background-color: #f6f2ed;
+            }
+
+            QMessageBox QLabel {
+                color: #55331b;
+                font-size: 13px;
+                font-weight: 700;
+            }
+
+            QMessageBox QPushButton {
+                min-width: 80px;
+                min-height: 30px;
+                border-radius: 6px;
+                background: #7a522d;
+                color: white;
+                border: none;
+                padding: 4px 10px;
+            }
+
+            QMessageBox QPushButton:hover {
+                background: #694422;
+            }
         """)
+
+
+if __name__ == "__main__":
+    import sys
+    from PyQt5.QtWidgets import QApplication
+
+    app = QApplication(sys.argv)
+    w = ReportDialog()
+    w.update_report_data(
+        batch="BCH-2026-001",
+        recommendation="Ready for storage and selling",
+        grade_number="1",
+        grade_tag="GRADE A",
+        operator="John D.",
+        date_text="Mar 14, 2026",
+        time_text="10:42 AM",
+        g1=20,
+        g2=30,
+        g3=20,
+        reject=10
+    )
+    w.show()
+    sys.exit(app.exec_())
