@@ -1,13 +1,14 @@
-from PyQt5.QtCore import Qt, QTimer
+from PyQt5.QtCore import Qt, QTimer, QEventLoop
 from PyQt5.QtGui import QColor, QTextDocument, QFont
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QFrame, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
     QGraphicsDropShadowEffect, QGraphicsBlurEffect,
-    QTextEdit, QMessageBox, QScrollArea, QGridLayout
+    QTextEdit, QMessageBox, QScrollArea, QGridLayout, QApplication
 )
 from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
 from datetime import datetime
+from printer import generate_receipt, print_to_usb
 
 
 class ReportDialog(QDialog):
@@ -398,101 +399,27 @@ class ReportDialog(QDialog):
         self.refresh_receipt_preview()
 
     def build_receipt_text(self):
-        now = datetime.now()
-
-        date_label_text = self.dateLabel.text().replace("Date:", "").strip()
-        time_label_text = self.timeLabel.text().replace("Time:", "").strip()
-
-        date_text = now.strftime("%Y-%m-%d") if not date_label_text else date_label_text
-        time_text = now.strftime("%H:%M:%S") if not time_label_text else time_label_text
-
-        operator_text = self.operatorLabel.text().replace("Operator:", "").strip()
-        batch_text = self.batchLabel.text().replace("Batch:", "").strip()
-
-        batch_no = batch_text
-        if "-" in batch_text:
-            try:
-                batch_no = str(int(batch_text.split("-")[-1]))
-            except:
-                batch_no = batch_text
-
-        grade_num = self.gradeNumber.text().strip()
-        grade_text = f"Grade {grade_num}"
-
-        confidence_map = {
-            "1": "89.0%",
-            "2": "80.0%",
-            "3": "70.0%"
-        }
-        confidence_text = confidence_map.get(grade_num, "0.0%")
-
-        line = "-" * 32
-        top = "=" * 32
-
-        receipt_text = (
-            f"{top}\n"
-            f"   COPRA QUALITY ANALYSIS\n"
-            f"        SYSTEM RECEIPT\n"
-            f"{top}\n"
-            f"Date: {date_text}\n"
-            f"Operator: {operator_text}\n"
-            f"\n"
-            f"Time: {time_text}\n"
-            f"{line}\n"
-            f"Batch No: {batch_no}\n"
-            f"Grade: {grade_text}\n"
-            f"Confidence: {confidence_text}\n"
-            f"{line}\n"
-            f"Moisture Readings:\n"
-            f"  Sensor 1: 12.4%\n"
-            f"  Sensor 2: 12.4%\n"
-            f"{line}\n"
-            f"Status: Accepted\n"
-            f"Recommendation:\n"
-            f"  Cooking Time: 45-50 min\n"
-            f"{line}\n"
-            f"         Thank you!\n"
-            f"{top}"
-        )
-        return receipt_text
+        data = self.parent().build_receipt_data()
+        return generate_receipt(data)
 
     def refresh_receipt_preview(self):
         self.receiptText.setPlainText(self.build_receipt_text())
-
     def print_report(self):
-        self.refresh_receipt_preview()
+        data = self.parent().build_receipt_data()
 
-        reply = QMessageBox.question(
-            self,
-            "Print Receipt",
-            "Do you want to print the receipt?",
-            QMessageBox.Yes | QMessageBox.No,
-            QMessageBox.Yes
-        )
+        dlg = ConfirmOverlay("Do you want to print the receipt?", self)
 
-        if reply != QMessageBox.Yes:
+        result = dlg.exec_()   # 👈 clean blocking call
+
+        if not result:
             return
 
-        printer = QPrinter(QPrinter.HighResolution)
-        printer.setPageMargins(2, 2, 2, 2, QPrinter.Millimeter)
+        receipt_text = generate_receipt(data)
+        print_to_usb(receipt_text)
 
-        dialog = QPrintDialog(printer, self)
-        if dialog.exec_() == QDialog.Accepted:
-            doc = QTextDocument()
-            doc.setDefaultFont(QFont("Courier New", 9))
-            html = f"""
-            <html>
-                <body style="
-                    font-family: 'Courier New', monospace;
-                    font-size: 9pt;
-                    white-space: pre;
-                    margin: 2px;
-                    color: black;
-                ">{self.build_receipt_text()}</body>
-            </html>
-            """
-            doc.setHtml(html)
-            doc.print_(printer)
+        self.parent().start_new_batch_after_print()
+
+            
 
     def add_shadow(self):
         outer_shadow = QGraphicsDropShadowEffect(self)
@@ -782,6 +709,134 @@ class ReportDialog(QDialog):
             }
         """)
 
+class ConfirmOverlay(QWidget):
+    def __init__(self, text, parent=None):
+        super().__init__(parent)
+
+        self.result = False
+        self.loop = QEventLoop()
+
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint)
+        self.setAttribute(Qt.WA_TranslucentBackground)
+
+        self.setGeometry(parent.geometry())
+
+        # 🔥 Dark glass background
+        self.setStyleSheet("""
+            QWidget {
+                background-color: rgba(20, 20, 20, 140);
+            }
+        """)
+
+        layout = QVBoxLayout(self)
+        layout.setAlignment(Qt.AlignCenter)
+
+        # 📦 Main card
+        box = QWidget()
+        box.setFixedWidth(320)
+        box.setStyleSheet("""
+            QWidget {
+                background: #f6f2ed;
+                border: 2px solid #d4c6b6;
+                border-radius: 16px;
+            }
+        """)
+
+        box_layout = QVBoxLayout(box)
+        box_layout.setContentsMargins(20, 18, 20, 18)
+        box_layout.setSpacing(14)
+
+        # 🏷️ Title
+        title = QLabel("Confirm Action")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            color: #6b4724;
+            font-family: Georgia;
+            font-size: 16px;
+            font-weight: 700;
+        """)
+
+        # 💬 Message
+        label = QLabel(text)
+        label.setAlignment(Qt.AlignCenter)
+        label.setWordWrap(True)
+        label.setStyleSheet("""
+            color: #55331b;
+            font-family: Georgia;
+            font-size: 13px;
+            font-weight: 600;
+        """)
+
+        # 🔘 Buttons row
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(12)
+
+        btn_yes = QPushButton("Yes")
+        btn_yes.setCursor(Qt.PointingHandCursor)
+        btn_yes.setStyleSheet("""
+            QPushButton {
+                background: qlineargradient(
+                    x1:0, y1:0, x2:0, y2:1,
+                    stop:0 #815733,
+                    stop:1 #694422
+                );
+                color: #f8ecd9;
+                border: 1px solid #5d3918;
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-family: Georgia;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #7a522d;
+            }
+            QPushButton:pressed {
+                background: #5e3c1f;
+            }
+        """)
+
+        btn_no = QPushButton("No")
+        btn_no.setCursor(Qt.PointingHandCursor)
+        btn_no.setStyleSheet("""
+            QPushButton {
+                background: #e8ded3;
+                color: #55331b;
+                border: 1px solid #cbb9a6;
+                border-radius: 8px;
+                padding: 6px 14px;
+                font-family: Georgia;
+                font-weight: 700;
+            }
+            QPushButton:hover {
+                background: #ddd0c2;
+            }
+        """)
+
+        btn_row.addWidget(btn_no)
+        btn_row.addWidget(btn_yes)
+
+        # 🧩 Assemble
+        box_layout.addWidget(title)
+        box_layout.addWidget(label)
+        box_layout.addLayout(btn_row)
+
+        layout.addWidget(box)
+
+        # 🎯 Actions (unchanged logic)
+        btn_yes.clicked.connect(lambda: self.finish(True))
+        btn_no.clicked.connect(lambda: self.finish(False))
+    def finish(self, value):
+        self.result = value
+        self.loop.quit()
+        self.close()
+
+    def mousePressEvent(self, event):
+        self.finish(False)
+
+    def exec_(self):
+        self.show()
+        self.loop.exec_()
+        return self.result
 
 if __name__ == "__main__":
     import sys

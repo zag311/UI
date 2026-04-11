@@ -62,6 +62,16 @@ def init_db():
         )
         ''')
         
+        try:
+            cursor.execute("ALTER TABLE ImageData ADD COLUMN moisture REAL")
+        except sqlite3.OperationalError:
+            pass  # already exists, ignore
+
+        try:
+            cursor.execute("ALTER TABLE ImageData ADD COLUMN confidence REAL")
+        except sqlite3.OperationalError:
+            pass
+
         # Receipt table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS Receipt (
@@ -83,37 +93,60 @@ def init_db():
 # -----------------------------
 # BATCH LOGIC
 # -----------------------------
-def start_new_batch(operator_id=1):
-    """
-    Creates a new batch and corresponding folder for images & receipts
-    """
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute("INSERT INTO Batch (operator_id) VALUES (?)", (operator_id,))
-        batch_id = cursor.lastrowid
-        conn.commit()
+def get_or_create_batch(operator_id=1):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    # Get latest batch
+    cursor.execute("""
+        SELECT batch_id FROM Batch
+        ORDER BY batch_id DESC
+        LIMIT 1
+    """)
+    row = cursor.fetchone()
+
+    if row:
+        last_batch_id = row[0]
+
+        # Check if it has images
+        cursor.execute("""
+            SELECT COUNT(*) FROM ImageData
+            WHERE batch_id = ?
+        """, (last_batch_id,))
+        count = cursor.fetchone()[0]
+
+        if count == 0:
+            conn.close()
+            print("[BATCH] Reusing empty batch:", last_batch_id)
+            return last_batch_id
+
+    # Otherwise create new batch
+    cursor.execute("""
+        INSERT INTO Batch (operator_id)
+        VALUES (?)
+    """, (operator_id,))
     
-    batch_image_folder = ensure_folder(os.path.join(IMAGES_ROOT, f"batch_{batch_id}"))
-    batch_receipt_folder = ensure_folder(os.path.join(RECEIPTS_ROOT, f"batch_{batch_id}"))
-    
-    return batch_id, batch_image_folder, batch_receipt_folder
+    conn.commit()
+    new_id = cursor.lastrowid
+    conn.close()
+
+    print("[BATCH] Created new batch:", new_id)
+    return new_id
 
 # -----------------------------
 # IMAGE LOGIC
 # -----------------------------
-def save_image(batch_id, image_path, grade='GRADE 1'):
-    """
-    Records an already-saved image into the database
-    """
-    with sqlite3.connect(DB_PATH) as conn:
-        cursor = conn.cursor()
-        cursor.execute(
-            "INSERT INTO ImageData (batch_id, image_path, grade) VALUES (?, ?, ?)",
-            (batch_id, image_path, grade)
-        )
-        conn.commit()
+def save_image(batch_id, image_path, grade, moisture, confidence):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
 
-    return image_path
+    cursor.execute("""
+        INSERT INTO ImageData (batch_id, image_path, grade, moisture, confidence)
+        VALUES (?, ?, ?, ?, ?)
+    """, (batch_id, image_path, grade, moisture, confidence))
+
+    conn.commit()
+    conn.close()
 # -----------------------------
 # RECEIPT LOGIC
 # -----------------------------

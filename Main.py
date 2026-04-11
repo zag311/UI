@@ -25,6 +25,8 @@ from PyQt5.QtWidgets import (
 
 from history import HistoryDialog
 from report import ReportDialog
+from create_tables import DB_PATH
+
 
 # ===== Constants (Scaled down) =====
 MODEL_PATH = "/home/aldenrecharge/Desktop/Raspberry/Copra_Final.tflite"
@@ -240,6 +242,13 @@ class MainWindow(QMainWindow):
 
         create_tables.init_db()
 
+        self.update_datetime()  # ensures values exist immediately
+
+        self.g1_count = 0
+        self.g2_count = 0
+        self.g3_count = 0
+        self.reject_count = 0
+
         # This exit button
         self.cancel_button = QPushButton("Cancel", self)
         self.cancel_button.setStyleSheet("""
@@ -295,8 +304,8 @@ class MainWindow(QMainWindow):
         self.arduino_grades = []  # new list to track grades
 
         # Start a batch when app starts
-        self.current_batch_id, self.image_folder, self.receipt_folder = create_tables.start_new_batch(operator_id=1)
-        
+        self.current_batch_id = create_tables.get_or_create_batch(operator_id=1)      
+
         # Moisture Capture
         self.auto_capture_enabled = True
         self.is_paused_for_measurement = False
@@ -604,6 +613,7 @@ class MainWindow(QMainWindow):
         self.overlay_layout.addLayout(button_row)
 
         self.load_current_batch()
+        self.load_batch_counts()   # 👈 ADD THIS
 
 
     def mouseDoubleClickEvent(self, event):
@@ -847,6 +857,24 @@ class MainWindow(QMainWindow):
         dialog.exec_()
 
     def open_report(self):
+        data = self.build_receipt_data()
+
+        grade_tag = f"GRADE {chr(64 + data['grade'])}" if data['grade'] <= 3 else "REJECT"
+
+        self.reportDialog.update_report_data(
+            batch=f"BATCH {data['batch_no']}",
+            recommendation=data["recommendation"],
+            grade_number=data["grade"],
+            grade_tag=grade_tag,
+            operator=getattr(self, "operator_name", "Operator 1"),
+            date_text=data["date"],
+            time_text=data["time"],
+            g1=data["g1"],
+            g2=data["g2"],
+            g3=data["g3"],
+            reject=data["reject"]
+        )
+
         self.reportDialog.exec_()
 
     def update_datetime(self):
@@ -1074,6 +1102,13 @@ class MainWindow(QMainWindow):
                     self.current_moisture = value
                     self.moistureValue.setText(f"{int(value)}%")
 
+                    if self.awaiting_stable_reading:
+                        self.show_overlay(
+                            f"Ready for moisture check\nMoisture: {value:.2f}%",
+                            show_cancel=True,
+                            show_start=True
+                        )
+
                     if value >= 14:
                         self.copraStatus.setText("COPRA STATUS: WET")
                     else:
@@ -1103,7 +1138,7 @@ class MainWindow(QMainWindow):
         normalized_ai_grade = {
             'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT', 'NOT': 'NON-COPRA',
             'GRADE 1': 'GRADE 1', 'GRADE 2': 'GRADE 2', 'GRADE 3': 'GRADE 3', 'REJECT': 'REJECT', 'NOT': 'NON-COPRA'
-        }.get(self.captured_label, 'NON-COPRA')  # default to REJECT if unknown
+        }.get(self.captured_label, 'NON-COPRA')  # default to non-copra if unknown
 
         normalized_moisture_grade = {
             'G1': 'GRADE 1', 'G2': 'GRADE 2', 'G3': 'GRADE 3', 'REJ': 'REJECT', 'NOT': 'NON-COPRA',
@@ -1112,6 +1147,14 @@ class MainWindow(QMainWindow):
 
         # Now pick worst
         final_grade_to_save = get_worst_grade(normalized_ai_grade, normalized_moisture_grade)
+        if final_grade_to_save == "GRADE 1":
+            self.g1_count += 1
+        elif final_grade_to_save == "GRADE 2":
+            self.g2_count += 1
+        elif final_grade_to_save == "GRADE 3":
+            self.g3_count += 1
+        elif final_grade_to_save == "REJECT":
+            self.reject_count += 1
 
         print("[DEBUG] AI:", normalized_ai_grade, "Moisture:", normalized_moisture_grade, "FINAL:", final_grade_to_save)
 
@@ -1150,7 +1193,9 @@ class MainWindow(QMainWindow):
             create_tables.save_image(
                 batch_id=self.current_batch_id,
                 image_path=filepath,
-                grade=final_grade_to_save
+                grade=final_grade_to_save,
+                moisture=avg_moisture,
+                confidence=self.captured_confidence * 100.0
             )
             print("[DB] Capture saved successfully.")
         except Exception as e:
@@ -1170,6 +1215,39 @@ class MainWindow(QMainWindow):
         self.moisture_done = False
         self.startBtn.setEnabled(True)
 
+    def get_recommendation(self):
+        counts = {
+            "g1": self.g1_count,
+            "g2": self.g2_count,
+            "g3": self.g3_count,
+            "reject": self.reject_count
+        }
+
+        dominant = max(counts, key=counts.get)
+
+        mapping = {
+            "g1": "Ready for storage and selling",
+            "g2": "Store properly before selling",
+            "g3": "Needs further drying",
+            "reject": "Not suitable for sale"
+        }
+
+        return mapping.get(dominant, "No recommendation")
+    
+    def get_final_batch_grade(self):
+        grades = []
+
+        if self.g1_count > 0:
+            grades.append(1)
+        if self.g2_count > 0:
+            grades.append(2)
+        if self.g3_count > 0:
+            grades.append(3)
+        if self.reject_count > 0:
+            grades.append(4)
+
+        return max(grades) if grades else 1
+
     def auto_capture(self, label, confidence):
         if self.last_frame is not None:
             self.captured_frame = self.last_frame.copy()
@@ -1187,8 +1265,18 @@ class MainWindow(QMainWindow):
         self.awaiting_stable_reading = True
         self.moisture_samples.clear()
 
-        # Show overlay
-        self.show_overlay("Ready for moisture check", show_cancel=True, show_start=True)
+        moisture_text = self.current_moisture
+
+        if moisture_text is None:
+            moisture_display = "Moisture: --"
+        else:
+            moisture_display = f"Moisture: {moisture_text:.2f}%"
+
+        self.show_overlay(
+            f"Ready for moisture check\n{moisture_display}",
+            show_cancel=True,
+            show_start=True
+        )
         
     def show_overlay(self, text, show_cancel=False, show_start=False):
         self.overlay_label.setText(text)
@@ -1273,24 +1361,115 @@ class MainWindow(QMainWindow):
             self.update_batch_label(0)
             return
 
-        # Get latest batch
-        batches.sort(key=lambda x: int(x.split("_")[1]))
-        latest_batch = batches[-1]
+        batches.sort(key=lambda x: int(x.split("_")[1]), reverse=True)
 
-        self.current_batch_id = int(latest_batch.split("_")[1])
+        selected_batch = None
+        selected_count = None
 
-        batch_path = os.path.join(base_dir, latest_batch)
+        for batch in batches:
+            batch_path = os.path.join(base_dir, batch)
 
-        # Count images
-        count = len([
-            f for f in os.listdir(batch_path)
-            if f.lower().endswith((".jpg", ".png"))
-        ])
+            images = [
+                f for f in os.listdir(batch_path)
+                if f.lower().endswith((".jpg", ".png"))
+            ]
 
-        self.update_batch_label(count)
+            if len(images) == 0:
+                selected_batch = batch
+                selected_count = 0
+                break
+
+        # If no empty batch found → create new one
+        if selected_batch is None:
+            latest_id = int(batches[0].split("_")[1])
+            self.current_batch_id = latest_id + 1
+
+            self.update_batch_label(0)
+            return
+
+        self.current_batch_id = int(selected_batch.split("_")[1])
+        self.update_batch_label(selected_count)
 
     def update_batch_label(self, count):
         self.batchLabel.setText(f"BATCH {self.current_batch_id}: {count} COPRA")
+
+    def build_receipt_data(self):
+        return {
+            "batch_no": self.current_batch_id,
+            "grade": self.get_final_batch_grade(),
+            "avg_confidence": self.get_average_confidence(),
+            "g1": self.g1_count,
+            "g2": self.g2_count,
+            "g3": self.g3_count,
+            "reject": self.reject_count,
+            "recommendation": self.get_recommendation(),
+            "date": self.current_date,
+            "time": self.current_time
+        }
+
+    def get_average_confidence(self):
+        import sqlite3
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT AVG(confidence)
+            FROM ImageData
+            WHERE batch_id = ?
+        """, (self.current_batch_id,))
+
+        result = cursor.fetchone()[0]
+        conn.close()
+
+        return round(result, 2) if result else 0.0
+    
+    def load_batch_counts(self):
+        import sqlite3
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT grade, COUNT(*)
+            FROM ImageData
+            WHERE batch_id = ?
+            GROUP BY grade
+        """, (self.current_batch_id,))
+
+        results = cursor.fetchall()
+        conn.close()
+
+        # Reset first
+        self.g1_count = 0
+        self.g2_count = 0
+        self.g3_count = 0
+        self.reject_count = 0
+
+        for grade, count in results:
+            if grade == "GRADE 1":
+                self.g1_count = count
+            elif grade == "GRADE 2":
+                self.g2_count = count
+            elif grade == "GRADE 3":
+                self.g3_count = count
+            elif grade == "REJECT":
+                self.reject_count = count
+
+    def start_new_batch_after_print(self):
+        import create_tables
+
+        print("[SYSTEM] Closing current batch and starting new one")
+
+        self.current_batch_id = create_tables.get_or_create_batch(operator_id=1)
+
+        # Reset counters
+        self.g1_count = 0
+        self.g2_count = 0
+        self.g3_count = 0
+        self.reject_count = 0
+
+        self.update_batch_label(0)
 
     # def update_preview(self):
     #     if self.cap is None:
