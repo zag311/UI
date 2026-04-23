@@ -1,19 +1,265 @@
-from PyQt5.QtCore import Qt, QTimer, QEventLoop
-from PyQt5.QtGui import QColor, QTextDocument, QFont
+from PyQt5.QtCore import Qt, QTimer, QEventLoop, pyqtSignal
+from PyQt5.QtGui import QColor, QFont
 from PyQt5.QtWidgets import (
     QDialog, QWidget, QFrame, QLabel, QPushButton,
     QHBoxLayout, QVBoxLayout, QSizePolicy,
     QGraphicsDropShadowEffect, QGraphicsBlurEffect,
-    QTextEdit, QMessageBox, QScrollArea, QGridLayout, QApplication
+    QTextEdit, QScrollArea, QGridLayout, QApplication
 )
-from PyQt5.QtPrintSupport import QPrinter, QPrintDialog
 from datetime import datetime
-from printer import generate_receipt, print_to_usb
+from printer import generate_receipt, print_to_usb 
+from db_helper import get_last_operator, get_operator_id
+from create_tables import create_new_batch, DB_PATH
 
+RECEIPT_SCHEMA = {
+    "grade": 0,
+    "avg_confidence": 0,
+    "operator": "",
+    "operator_id": None,
+    "batch": "",
+    "batch_id": None,
+    "g1": 0,
+    "g2": 0,
+    "g3": 0,
+    "reject": 0,
+    "date": "",
+    "time": ""
+}
+
+class OnScreenKeyboard(QWidget):
+    def __init__(self, target_input, parent=None):
+        super().__init__(parent)
+        self.target_input = target_input
+
+        self.caps_on = True
+        self.letter_buttons = []
+        self.caps_button = None
+
+        main_layout = QVBoxLayout()
+        main_layout.setSpacing(8)
+        main_layout.setContentsMargins(8, 8, 8, 8)
+
+        self.rows = []
+
+        keys = [
+            ['1','2','3','4','5','6','7','8','9','0'],
+            ['Q','W','E','R','T','Y','U','I','O','P'],
+            ['A','S','D','F','G','H','J','K','L'],
+            ['CAPS','Z','X','C','V','B','N','M','BACK'],
+            ['SPACE']
+        ]
+
+        for row in keys:
+            row_widget = QWidget()
+            row_layout = QHBoxLayout()
+            row_layout.setSpacing(8)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+
+            for key in row:
+                btn = QPushButton(key)
+
+                btn.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+                btn.setMinimumHeight(55)
+
+                btn.setStyleSheet("""
+                    QPushButton {
+                        font-size: 20px;
+                        font-weight: bold;
+                        background: #e8ded3;
+                        border: 1px solid #cbb9a6;
+                        border-radius: 8px;
+                    }
+                    QPushButton:hover {
+                        background: #ddd0c2;
+                    }
+                """)
+
+                if key.isalpha():
+                    self.letter_buttons.append(btn)
+
+                if key == "CAPS":
+                    self.caps_button = btn
+
+                btn.clicked.connect(lambda _, k=key: self.handle_key(k))
+
+                # flexible space behavior
+                if key == "SPACE":
+                    btn.setMinimumWidth(200)
+
+                if key == "BACK":
+                    btn.setMinimumWidth(120)
+
+                row_layout.addWidget(btn)
+
+            row_widget.setLayout(row_layout)
+            main_layout.addWidget(row_widget)
+
+            self.rows.append(row_widget)
+
+        self.setLayout(main_layout)
+
+        self.update_keys()
+        
+    def set_target(self, target_input):
+        self.target_input = target_input
+
+    def update_keys(self):
+        # Update letter case visually
+        for btn in self.letter_buttons:
+            text = btn.text()
+            btn.setText(text.upper() if self.caps_on else text.lower())
+
+        # Highlight CAPS when active
+        if self.caps_button:
+            if self.caps_on:
+                self.caps_button.setStyleSheet("""
+                    QPushButton {
+                        font-size: 20px;
+                        font-weight: bold;
+                        background: #b88445;
+                        color: white;
+                        border-radius: 8px;
+                    }
+                """)
+            else:
+                self.caps_button.setStyleSheet("""
+                    QPushButton {
+                        font-size: 20px;
+                        font-weight: bold;
+                        background: #e8ded3;
+                        border: 1px solid #cbb9a6;
+                        border-radius: 8px;
+                    }
+                    QPushButton:hover {
+                        background: #ddd0c2;
+                    }
+                """)
+
+    def handle_key(self, key):
+        target = self.target_input
+        if not target:
+            return
+
+        # 🔥 CAPS toggle
+        if key == "CAPS":
+            self.caps_on = not self.caps_on
+            self.update_keys()
+            return
+
+        # 🔥 Determine actual character
+        if key.isalpha():
+            char = key.upper() if self.caps_on else key.lower()
+        else:
+            char = key
+
+        # QTextEdit
+        if isinstance(target, QTextEdit):
+            if key == "SPACE":
+                target.insertPlainText(" ")
+            elif key == "BACK":
+                cursor = target.textCursor()
+                cursor.deletePreviousChar()
+            else:
+                target.insertPlainText(char)
+
+        # QLineEdit
+        else:
+            try:
+                if key == "SPACE":
+                    target.insert(" ")
+                elif key == "BACK":
+                    text = target.text()
+                    target.setText(text[:-1])
+                else:
+                    target.insert(char)
+            except:
+                pass
+
+class OperatorInputDialog(QDialog):
+    def __init__(self, parent=None, current_name=""):
+        super().__init__(parent)
+
+        self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
+        self.setModal(True)
+
+        # 🔥 Let it scale instead of forcing small size
+        self.setMinimumSize(900, 500)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(12, 12, 12, 12)
+        layout.setSpacing(10)
+
+        # 🏷️ Title
+        title = QLabel("Enter Operator Name:")
+        title.setAlignment(Qt.AlignCenter)
+        title.setStyleSheet("""
+            font-size: 18px;
+            font-weight: bold;
+        """)
+
+        # 📝 Input field
+        self.input = QTextEdit()
+        self.input.setFixedHeight(70)
+        self.input.setText(current_name)
+        self.input.setFocus()
+
+        self.input.setStyleSheet("""
+            QTextEdit {
+                font-size: 20px;
+                padding: 6px;
+                border: 2px solid #cbb9a6;
+                border-radius: 6px;
+                background: #ffffff;
+            }
+        """)
+
+        # ⌨️ Keyboard
+        self.keyboard = OnScreenKeyboard(self.input)
+
+        # 🔘 Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        ok_btn = QPushButton("OK")
+        cancel_btn = QPushButton("Cancel")
+
+        for btn in (ok_btn, cancel_btn):
+            btn.setMinimumHeight(45)
+            btn.setStyleSheet("""
+                QPushButton {
+                    font-size: 16px;
+                    font-weight: bold;
+                    background: #7a522d;
+                    color: white;
+                    border-radius: 6px;
+                }
+                QPushButton:hover {
+                    background: #694422;
+                }
+            """)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(ok_btn)
+
+        # 🧩 Layout assembly
+        layout.addWidget(title)
+        layout.addWidget(self.input)
+        layout.addWidget(self.keyboard, 1)  # 🔥 THIS makes keyboard take space
+        layout.addLayout(btn_row)
+
+        ok_btn.clicked.connect(self.accept)
+        cancel_btn.clicked.connect(self.reject)
+
+    def get_value(self):
+        return self.input.toPlainText().strip()
 
 class ReportDialog(QDialog):
-    def __init__(self, parent=None):
+    operator_changed = pyqtSignal(int, str)
+    request_new_batch = pyqtSignal()
+
+    def __init__(self, parent=None, batch_id=None):
         super().__init__(parent)
+        self.batch_id = batch_id
         self.main_parent = parent
         self.blur_effect = None
 
@@ -23,6 +269,7 @@ class ReportDialog(QDialog):
             "g3": 20,
             "reject": 10
         }
+        self.current_operator_id = None
 
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.Dialog)
         self.setModal(True)
@@ -71,11 +318,17 @@ class ReportDialog(QDialog):
         self.dateLabel = QLabel("Date: Mar 14, 2026")
         self.timeLabel = QLabel("Time: 10:42 AM")
         self.operatorLabel = QLabel("Operator: John D.")
+        
 
         self.dateLabel.setObjectName("TopInfo")
         self.timeLabel.setObjectName("TopInfo")
         self.operatorLabel.setObjectName("TopInfo")
 
+        self.editOperatorBtn = QPushButton("✎")
+        self.editOperatorBtn.setObjectName("TopEditBtn")
+        self.editOperatorBtn.setFixedSize(26, 26)
+        self.editOperatorBtn.setCursor(Qt.PointingHandCursor)
+        
         sep = QLabel("|")
         sep.setObjectName("TopSep")
 
@@ -83,7 +336,16 @@ class ReportDialog(QDialog):
         infoLay.addWidget(sep)
         infoLay.addWidget(self.timeLabel)
         infoLay.addStretch(1)
-        infoLay.addWidget(self.operatorLabel, 0, Qt.AlignRight | Qt.AlignVCenter)
+
+        opWrap = QHBoxLayout()
+        opWrap.setSpacing(6)
+        opWrap.addWidget(self.operatorLabel)
+        opWrap.addWidget(self.editOperatorBtn)
+
+        opContainer = QWidget()
+        opContainer.setLayout(opWrap)
+
+        infoLay.addWidget(opContainer, 0, Qt.AlignRight | Qt.AlignVCenter)
 
         panelLay.addWidget(infoWrap)
 
@@ -205,7 +467,7 @@ class ReportDialog(QDialog):
         gradeLay.setContentsMargins(18, 14, 18, 14)
         gradeLay.setSpacing(8)
 
-        self.gradeTag = QLabel("GRADE A")
+        self.gradeTag = QLabel("GRADE")
         self.gradeTag.setObjectName("GradeTag")
         self.gradeTag.setAlignment(Qt.AlignCenter)
         self.gradeTag.setFixedHeight(40)
@@ -294,12 +556,33 @@ class ReportDialog(QDialog):
         self.add_shadow()
         self.setup_connections()
         self.refresh_grade_summary()
-        self.refresh_receipt_preview()
+
+        # 🔥 delay receipt rendering until UI is fully ready
+        QTimer.singleShot(0, self.refresh_receipt_preview)
+        self.set_operator(get_last_operator())
+
+        self.operator_name = get_last_operator()
+        self.current_operator_id = get_operator_id(self.operator_name)
+
+        self.current_grade_number = 1
 
     def setup_connections(self):
         self.scanBtn.clicked.connect(self.close)
         self.historyBtn.clicked.connect(self.open_history)
         self.printBtn.clicked.connect(self.print_report)
+        self.editOperatorBtn.clicked.connect(self.modify_operator)
+
+    def modify_operator(self):
+        dialog = OperatorInputDialog(
+            self,
+            current_name=self.operatorLabel.text().replace("Operator: ", "")
+        )
+
+        if dialog.exec_():
+            new_name = dialog.get_value()
+
+            if new_name:
+                self.set_operator(new_name)
 
     def open_history(self):
         from history import HistoryDialog
@@ -312,6 +595,10 @@ class ReportDialog(QDialog):
         self.g3Label.setText(f"3 = {self.grade_counts['g3']}pcs")
         self.rejectLabel.setText(f"Rejects = {self.grade_counts['reject']}pcs")
 
+        # 👇 NEW: update dominant grade
+        dominant_grade = self.compute_dominant_grade()
+        self.set_grade(dominant_grade)
+
     def set_batch(self, batch_text):
         self.batchLabel.setText(f"Batch: {batch_text}")
         self.refresh_receipt_preview()
@@ -323,15 +610,43 @@ class ReportDialog(QDialog):
         self.refresh_receipt_preview()
 
     def set_grade(self, grade_number, grade_tag=None):
-        self.gradeNumber.setText(str(grade_number))
-        if grade_tag is None:
-            grade_tag = f"GRADE {chr(64 + int(grade_number))}" if str(grade_number).isdigit() and 1 <= int(grade_number) <= 26 else "GRADE"
-        self.gradeTag.setText(grade_tag)
+        try:
+            grade_number = int(grade_number)
+        except:
+            grade_number = 0
+
+        # 🔥 Only allow 1,2,3 — everything else = REJECT
+        if grade_number in (1, 2, 3):
+            self.current_grade_number = grade_number
+
+            if grade_tag is None:
+                grade_tag = f"GRADE {chr(64 + grade_number)}"  # 1→A, 2→B, 3→C
+
+            self.gradeNumber.setText(str(grade_number))
+            self.gradeTag.setText(grade_tag)
+
+        else:
+            self.current_grade_number = 0  # or 4 if you prefer a reject code
+
+            self.gradeNumber.setText("REJ")
+            self.gradeTag.setText("REJECTED")
+
         self.refresh_receipt_preview()
 
     def set_operator(self, operator_name):
+        from db_helper import ensure_operator_exists, get_operator_id, set_active_operator
+
+        ensure_operator_exists(operator_name)
+        operator_id = get_operator_id(operator_name)
+
         self.operatorLabel.setText(f"Operator: {operator_name}")
-        self.refresh_receipt_preview()
+        self.current_operator_id = operator_id
+
+        # 🔥 PERSIST ACTIVE OPERATOR
+        set_active_operator(operator_id)
+
+        # notify system
+        self.operator_changed.emit(operator_id, operator_name)
 
     def set_date_time(self, date_text=None, time_text=None):
         if date_text:
@@ -347,6 +662,9 @@ class ReportDialog(QDialog):
         self.grade_counts["reject"] = reject
         self.refresh_grade_summary()
         self.refresh_receipt_preview()
+
+    def get_current_operator_id(self):
+        return self.current_operator_id
 
     def update_report_data(
         self,
@@ -399,27 +717,95 @@ class ReportDialog(QDialog):
         self.refresh_receipt_preview()
 
     def build_receipt_text(self):
-        data = self.parent().build_receipt_data()
+        data = self.build_receipt_data()
         return generate_receipt(data)
+
+    def normalize_receipt_data(self, raw: dict) -> dict:
+        data = RECEIPT_SCHEMA.copy()
+
+        if raw:
+            data.update(raw)
+
+        # 🔥 force-safe conversions
+        try:
+            data["grade"] = int(data.get("grade", 0))
+        except:
+            data["grade"] = 0
+
+        try:
+            data["avg_confidence"] = float(data.get("avg_confidence", 0))
+        except:
+            data["avg_confidence"] = 0
+
+        return data
+
+    def build_receipt_data(self):
+            return self.normalize_receipt_data({
+            "grade": getattr(self, "current_grade_number", 0),
+
+            "avg_confidence": self.compute_avg_confidence(),
+
+            "operator": self.operatorLabel.text().replace("Operator: ", "").strip() if hasattr(self, "operatorLabel") else "",
+
+            "operator_id": getattr(self, "current_operator_id", None),
+
+            "batch": self.batchLabel.text().replace("Batch: ", "").strip() if hasattr(self, "batchLabel") else "",
+
+            "batch_id": getattr(self, "batch_id", None),
+
+            "g1": self.grade_counts.get("g1", 0),
+            "g2": self.grade_counts.get("g2", 0),
+            "g3": self.grade_counts.get("g3", 0),
+            "reject": self.grade_counts.get("reject", 0),
+
+            "recommendation": self.recommendationLabel.text().replace("Recommendation:", "").strip()
+            if hasattr(self, "recommendationLabel") else "",
+        })
+
+    def compute_avg_confidence(self):
+        import sqlite3
+
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+
+        cursor.execute("""
+            SELECT AVG(confidence)
+            FROM ImageData
+            WHERE batch_id = ?
+        """, (self.batch_id,))
+
+        result = cursor.fetchone()[0]
+        conn.close()
+
+        return round(result or 0, 2)
 
     def refresh_receipt_preview(self):
         self.receiptText.setPlainText(self.build_receipt_text())
+
     def print_report(self):
-        data = self.parent().build_receipt_data()
+        from db_helper import get_operator_id
 
         dlg = ConfirmOverlay("Do you want to print the receipt?", self)
-
-        result = dlg.exec_()   # 👈 clean blocking call
-
-        if not result:
+        if not dlg.exec_():
             return
 
+        # 🔥 SNAPSHOT EVERYTHING FIRST
+        data = self.build_receipt_data()
+
+        # lock operator id properly
+        data["operator_id"] = get_operator_id(data["operator"])
+
+        # print
         receipt_text = generate_receipt(data)
         print_to_usb(receipt_text)
 
-        self.parent().start_new_batch_after_print()
-
-            
+        # 🔥 AFTER SUCCESS → rotate batch
+        try:
+            create_new_batch(data["operator_id"])
+            from create_tables import get_active_batch
+            self.batch_id = get_active_batch()
+        except Exception as e:
+            print("[PRINT ERROR] batch update failed:", e)
 
     def add_shadow(self):
         outer_shadow = QGraphicsDropShadowEffect(self)
@@ -707,7 +1093,54 @@ class ReportDialog(QDialog):
             QMessageBox QPushButton:hover {
                 background: #694422;
             }
+            
+            #TopEditBtn {
+                background: rgba(120, 80, 40, 30);
+                border: 1px solid #b89a7a;
+                border-radius: 6px;
+                color: #5a3820;
+                font-weight: bold;
+            }
+
+            #TopEditBtn:hover {
+                background: rgba(120, 80, 40, 50);
+            }
         """)
+
+    def set_receipt_data(self, data: dict):
+        self.receipt_data = data
+
+        self.update_report_data(
+            batch=data.get("batch"),
+            recommendation=data.get("recommendation"),
+            grade_number=data.get("grade"),
+            grade_tag=f"GRADE {chr(64 + data.get('grade', 0))}" if data.get("grade", 0) in (1,2,3) else "REJECT",
+            operator=data.get("operator"),
+            date_text=data.get("date"),
+            time_text=data.get("time"),
+            g1=data.get("g1"),
+            g2=data.get("g2"),
+            g3=data.get("g3"),
+            reject=data.get("reject")
+        )
+
+    def compute_dominant_grade(self):
+        counts = self.grade_counts
+
+        grade_map = {
+            "g1": counts["g1"],
+            "g2": counts["g2"],
+            "g3": counts["g3"],
+            "reject": counts["reject"]  # 🔥 include rejects
+        }
+
+        dominant = max(grade_map, key=grade_map.get)
+
+        # 🔥 Handle reject separately
+        if dominant == "reject":
+            return 0  # or 4, depending on your system
+
+        return int(dominant[1])  # "g1" → 1
 
 class ConfirmOverlay(QWidget):
     def __init__(self, text, parent=None):
@@ -838,6 +1271,7 @@ class ConfirmOverlay(QWidget):
         self.loop.exec_()
         return self.result
 
+
 if __name__ == "__main__":
     import sys
     from PyQt5.QtWidgets import QApplication
@@ -847,8 +1281,8 @@ if __name__ == "__main__":
     w.update_report_data(
         batch="BCH-2026-001",
         recommendation="Ready for storage and selling",
-        grade_number="1",
-        grade_tag="GRADE A",
+        grade_number=1,
+        grade_tag="GRADE",
         operator="John D.",
         date_text="Mar 14, 2026",
         time_text="10:42 AM",

@@ -1,5 +1,11 @@
-from PyQt5.QtCore import Qt, QDate
-from PyQt5.QtGui import QColor, QPixmap
+import os
+os.environ["QT_QPA_PLATFORM"] = "wayland"
+os.environ["QT_QUICK_BACKEND"] = "software"
+os.environ["QT_VIRTUALKEYBOARD_LAYOUT_PATH"] = "/usr/share/qt5/qml/QtQuick/VirtualKeyboard/content/layouts"
+os.environ["QT_WAYLAND_DISABLE_WINDOWDECORATION"] = "1"
+from PyQt5.QtCore import Qt, QDate, QEvent, QLibraryInfo, QTimer
+print(QLibraryInfo.location(QLibraryInfo.PluginsPath))
+from PyQt5.QtGui import QColor, QPixmap, QGuiApplication
 from PyQt5.QtWidgets import (
     QApplication, QDialog, QVBoxLayout, QLabel, QHBoxLayout, QLineEdit,
     QPushButton, QTableWidget, QTableWidgetItem, QHeaderView, QWidget,
@@ -9,8 +15,10 @@ from PyQt5.QtWidgets import (
 import sqlite3
 from create_tables import DB_PATH
 from db_helper import get_batches, get_grade_counts, get_batch_images
-import os
-
+import logging
+from PyQt5.QtCore import QCoreApplication
+QCoreApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+from report import OnScreenKeyboard
 
 # -----------------------------
 # UTILITY CLASSES
@@ -78,7 +86,7 @@ class FilterDialog(QDialog):
     def __init__(self, operators=None, parent=None):
         super().__init__(parent)
         self.setModal(True)
-        self.setWindowFlags(Qt.Dialog | Qt.FramelessWindowHint)
+        self.setWindowFlags(Qt.Window | Qt.FramelessWindowHint)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(430, 420)
 
@@ -402,16 +410,6 @@ class BatchDetailsDialog(QDialog):
             font-size:15px;
             font-weight:900;
         }
-        QLabel#GradeGroupHeader {
-            font-size:20px;
-            font-weight:900;
-            color:#6f3d0c;
-            margin:12px 0 6px 0;
-            padding:6px 12px;
-            background-color: rgba(252, 243, 228, 0.5);
-            border-left: 4px solid #be8a2f;
-            border-radius:6px;
-        }
         QScrollArea { background: transparent; }
         """)
 
@@ -488,6 +486,10 @@ class HistoryDialog(QDialog):
         self.search.setObjectName("Search")
         self.search.setMinimumHeight(50)
 
+        self.search.setFocusPolicy(Qt.StrongFocus)
+        self.search.setAttribute(Qt.WA_InputMethodEnabled, True)
+        QTimer.singleShot(50, self.search.setFocus)
+
         self.filterBtn = QPushButton("Filter")
         self.filterBtn.setObjectName("TopBtn")
         self.filterBtn.setFixedWidth(170)
@@ -518,8 +520,7 @@ class HistoryDialog(QDialog):
         self.table.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self.table.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.table.setSizeAdjustPolicy(QAbstractScrollArea.AdjustToContents)
-        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         header = self.table.horizontalHeader()
         header.setFixedHeight(54)
         header.setDefaultAlignment(Qt.AlignCenter)
@@ -529,13 +530,43 @@ class HistoryDialog(QDialog):
         header.setSectionResizeMode(3, QHeaderView.Stretch)
         header.setSectionResizeMode(4, QHeaderView.ResizeToContents)
 
-        root.addWidget(self.table, 1)
+        # --- STACKED AREA (TABLE + KEYBOARD) ---
+        self.stackContainer = QWidget()
+        self.stackLayout = QVBoxLayout(self.stackContainer)
+        self.stackLayout.setContentsMargins(0, 0, 0, 0)
+        self.stackLayout.setSpacing(0)
+
+        # Table (main view)
+        self.table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+
+        # Keyboard (hidden by default)
+        self.keyboard = OnScreenKeyboard(self.search)
+        self.keyboard.setVisible(False)
+        self.keyboard.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.keyboard.setMinimumHeight(320)
+        self.keyboard.setMaximumHeight(350)
+
+        # Add both into stack
+        self.stackLayout.addWidget(self.table, 1)
+        self.stackLayout.addWidget(self.keyboard, 0)
+
+        # Add stack to main layout
+        root.addWidget(self.stackContainer, 1)
+
+        self.search.installEventFilter(self)
+        self.table.installEventFilter(self)
+        self.card.installEventFilter(self)
 
         self.load_history_data()
+        self.pad_table()
 
         self.search.textChanged.connect(self.apply_all_filters)
         self.filterBtn.clicked.connect(self.open_filter_dialog)
         self.closeBtn.clicked.connect(self.close)
+
+        self.search.installEventFilter(self)
+
+        QTimer.singleShot(200, self.force_keyboard)
 
         self.setStyleSheet("""
         QDialog { background: rgba(36, 24, 14, 70); }
@@ -565,7 +596,73 @@ class HistoryDialog(QDialog):
         #ScanImage { background:#f7f1ea; border:1px dashed #d8c8b9; border-radius:14px; color:#aa8d70; font-size:14px; font-weight:700; padding:10px; }
         #GradeBadge { background:qlineargradient(x1:0,y1:0,x2:1,y2:0, stop:0 #9c6a22, stop:1 #be8a2f); color:white; border-radius:12px; padding:10px 12px; font-size:15px; font-weight:900; }
         QScrollArea { background: transparent; }
-        """)
+        """)    
+
+    def pad_table(self, min_rows=8):
+        current = self.table.rowCount()
+
+        for i in range(current, min_rows):
+            self.table.insertRow(i)
+            for c in range(self.table.columnCount()):
+                item = QTableWidgetItem("")
+                item.setFlags(Qt.NoItemFlags)
+                self.table.setItem(i, c, item)
+
+    def show_keyboard(self):
+        self.keyboard.setVisible(True)
+
+    def hide_keyboard(self):
+        self.keyboard.setVisible(False)
+
+    def eventFilter(self, obj, event):
+        if obj == self.search:
+            if event.type() in (QEvent.FocusIn, QEvent.MouseButtonPress):
+                self.keyboard.set_target(self.search)
+                self.show_keyboard()
+                QGuiApplication.inputMethod().show()
+                return False
+
+        if event.type() == QEvent.MouseButtonPress:
+            if obj != self.search:
+                self.hide_keyboard()
+                self.search.clearFocus()
+
+        return super().eventFilter(obj, event)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.hide_keyboard()
+        QGuiApplication.inputMethod().hide()
+
+    def trigger_keyboard(self):
+        self.search.setFocus()
+        QGuiApplication.inputMethod().show()
+
+    def force_keyboard(self):
+        self.search.setFocus()
+        QGuiApplication.inputMethod().show()
+        QGuiApplication.inputMethod().update(Qt.ImQueryAll)
+
+    def on_search_focus(self, event):
+        QLineEdit.focusInEvent(self.search, event)
+        self.keyboard.set_target(self.search)
+        self.show_keyboard()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.trigger_keyboard()
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(150, self.search.setFocus)
+            
+    def open_search_keyboard(self, event):
+        self.search.setFocus()
+        QLineEdit.mousePressEvent(self.search, event)
+
+    def wrap_click(self, event):
+        self.search.setFocus()
+        QLineEdit.mousePressEvent(self.search, event)
 
     def get_unique_operators(self):
         operators = set()
@@ -708,10 +805,12 @@ class HistoryDialog(QDialog):
 
             self.table.setRowHidden(r, not match)
 
-
 if __name__ == "__main__":
     import sys
     app = QApplication(sys.argv)
+
+    app.setAttribute(Qt.AA_InputMethodEnabled, True)    
+
     w = HistoryDialog()
     w.show()
     sys.exit(app.exec_())

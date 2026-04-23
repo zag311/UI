@@ -8,7 +8,6 @@ import re
 import create_tables
 from datetime import datetime
 from statistics import mode, StatisticsError
-
 from PyQt5.QtCore import (
     Qt, QTimer, QDateTime, QRectF,
     QPropertyAnimation, QEasingCurve, pyqtProperty, 
@@ -22,10 +21,12 @@ from PyQt5.QtWidgets import (
     QHBoxLayout, QVBoxLayout, QFrame, QSizePolicy,
     QGraphicsDropShadowEffect
 )
-
 from history import HistoryDialog
 from report import ReportDialog
-from create_tables import DB_PATH
+from create_tables import DB_PATH, set_active_operator
+from db_helper import get_active_operator, get_operator_id, get_operator_name
+import logging
+import subprocess
 
 
 # ===== Constants (Scaled down) =====
@@ -48,6 +49,16 @@ NORMALIZED_RANK = {
     "REJECT": 4,
     "REJ": 4,
 }
+
+class QTextEditLogger(logging.Handler):
+    def __init__(self, widget):
+        super().__init__()
+        self.widget = widget
+
+    def emit(self, record):
+        msg = self.format(record)
+        QTimer.singleShot(0, lambda: self.widget.append(msg))
+
 
 def get_worst_grade(grade1, grade2):
     """
@@ -74,37 +85,41 @@ class CameraThread(QThread):
         self.running = False
 
     def run(self):
-        cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
+        try:
+            cap = cv2.VideoCapture(self.cam_index, cv2.CAP_V4L2)
 
-        cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
-        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
-        cap.set(cv2.CAP_PROP_FPS, self.fps)
-        cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.width)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.height)
+            cap.set(cv2.CAP_PROP_FPS, self.fps)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
 
-        # 🔴 VERY IMPORTANT: reduce buffer
-        cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+            # 🔴 VERY IMPORTANT: reduce buffer
+            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
-        # if not cap.isOpened():
-        #     print("Camera failed to open")
-        #     return
+            if not cap.isOpened():
+                logging.error("Camera failed to open")
+                self.camera_failed.emit()
+                return
+            
+            self.running = True
 
-        self.running = True
+            while self.running:
+                ret, frame = cap.read()
 
-        while self.running:
-            ret, frame = cap.read()
+                if not ret or frame is None:
+                    # skip corrupted frame
+                    self.msleep(10)
+                    continue
 
-            if not ret or frame is None:
-                # skip corrupted frame
-                self.msleep(10)
-                continue
+                # emit only good frames
+                self.frame_ready.emit(frame)
 
-            # emit only good frames
-            self.frame_ready.emit(frame)
+                # 🔴 throttle to avoid MJPG corruption
+                self.msleep(30)  # ~30ms ≈ 30 FPS safe pacing
 
-            # 🔴 throttle to avoid MJPG corruption
-            self.msleep(30)  # ~30ms ≈ 30 FPS safe pacing
-
-        cap.release()
+            cap.release()
+        except Exception as e:
+            logging.error(f"Something went wrong: {e}", exc_info=True)
 
     def stop(self):
         self.running = False
@@ -219,28 +234,29 @@ class AIWorker(QThread):
         self.output_details = output_details
 
     def run(self):
-        frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
-        resized = cv2.resize(frame_rgb, IMAGE_SIZE)
-        img_array = resized.astype(np.float32)
-        img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
-        img_array = np.expand_dims(img_array, axis=0)
+        try:
+            frame_rgb = cv2.cvtColor(self.frame, cv2.COLOR_BGR2RGB)
+            resized = cv2.resize(frame_rgb, IMAGE_SIZE)
+            img_array = resized.astype(np.float32)
+            img_array = tf.keras.applications.mobilenet_v2.preprocess_input(img_array)
+            img_array = np.expand_dims(img_array, axis=0)
 
-        self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
-        self.interpreter.invoke()
-        output = self.interpreter.get_tensor(self.output_details[0]['index'])
+            self.interpreter.set_tensor(self.input_details[0]['index'], img_array)
+            self.interpreter.invoke()
+            output = self.interpreter.get_tensor(self.output_details[0]['index'])
 
-        idx = int(np.argmax(output))
-        confidence = float(output[0][idx])
-        label = CLASS_NAMES[idx]
-        print(label)
-        self.result_ready.emit(label, confidence)
+            idx = int(np.argmax(output))
+            confidence = float(output[0][idx])
+            label = CLASS_NAMES[idx]
+            print(label)
+            self.result_ready.emit(label, confidence)
+        except Exception as e:
+            logging.error(f"Something went wrong: {e}", exc_info=True)
 
 # ===== Main Window =====
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
-
-        create_tables.init_db()
 
         self.update_datetime()  # ensures values exist immediately
 
@@ -248,6 +264,18 @@ class MainWindow(QMainWindow):
         self.g2_count = 0
         self.g3_count = 0
         self.reject_count = 0
+
+
+        active_id = get_active_operator()
+
+        if active_id is None:
+            # first run fallback
+            self.operator_name = "Default Operator"
+            self.operator_id = get_operator_id(self.operator_name)
+            set_active_operator(self.operator_id)
+        else:
+            self.operator_id = active_id
+            self.operator_name = get_operator_name(active_id)     
 
         # This exit button
         self.cancel_button = QPushButton("Cancel", self)
@@ -296,16 +324,19 @@ class MainWindow(QMainWindow):
         self.overlay_start_button.hide()
 
         # Updated Camera
-        self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
-        self.camera_thread.frame_ready.connect(self.update_preview)
-        self.camera_thread.start()
-        self.camera_thread.camera_failed.connect(self.on_camera_failed)
-        self.moisture_samples = []
-        self.arduino_grades = []  # new list to track grades
+        try:
+            self.camera_thread = CameraThread(cam_index=0, width=400, height=680, fps=20)
+            self.camera_thread.frame_ready.connect(self.update_preview)
+            self.camera_thread.start()
+            self.camera_thread.camera_failed.connect(self.on_camera_failed)
+            self.moisture_samples = []
+            self.arduino_grades = []  # new list to track grades
+        except Exception as e:
+            logging.error(f"Something went wrong: {e}", exc_info=True)
 
         # Start a batch when app starts
-        self.current_batch_id = create_tables.get_or_create_batch(operator_id=1)      
-
+        self.current_batch_id = create_tables.get_active_batch()
+        
         # Moisture Capture
         self.auto_capture_enabled = True
         self.is_paused_for_measurement = False
@@ -321,10 +352,13 @@ class MainWindow(QMainWindow):
         self.moisture_active = False
 
         # Load AI model
-        self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
-        self.interpreter.allocate_tensors()
-        self.input_details = self.interpreter.get_input_details()
-        self.output_details = self.interpreter.get_output_details()
+        try:
+            self.interpreter = tf.lite.Interpreter(model_path=MODEL_PATH)
+            self.interpreter.allocate_tensors()
+            self.input_details = self.interpreter.get_input_details()
+            self.output_details = self.interpreter.get_output_details()
+        except Exception as e:
+            logging.error(f"Something went wrong: {e}", exc_info=True)
 
         self.ai_thread_running = False
         self.last_label = None
@@ -341,7 +375,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.ser = None
             self.serial_connected = False
-            print("[SERIAL] Not connected:", e)
+            logging.error(f"Serial error: {e}", exc_info=True)
         self.serial_timer = QTimer(self)
         self.serial_timer.timeout.connect(self.read_serial)
 
@@ -371,8 +405,7 @@ class MainWindow(QMainWindow):
 
         self.powerHoldTimer = QTimer(self)
         self.powerHoldTimer.setSingleShot(True)
-        self.powerHoldTimer.timeout.connect(self.close)
-
+        self.powerHoldTimer.timeout.connect(self.shutdown_pi)
         # ===== Layout =====
         central = QWidget()
         self.setCentralWidget(central)
@@ -389,6 +422,8 @@ class MainWindow(QMainWindow):
         self.titleLabel.setObjectName("HeaderTitle")
         self.titleLabel.setAlignment(Qt.AlignCenter)
         headerLay.addWidget(self.titleLabel)
+        self.operatorLabel = QLabel(f"Operator: {self.operator_name}")
+        self.operatorLabel.setAlignment(Qt.AlignCenter)
         outer.addWidget(headerWrap)
 
         # Body
@@ -566,7 +601,10 @@ class MainWindow(QMainWindow):
         bottomLay.addWidget(self.powerBtn,0)
         outer.addWidget(bottomWrap)
 
+        self.current_operator_id = get_operator_id("Default Operator")
         self.reportDialog = ReportDialog(self)
+        self.reportDialog.operator_changed.connect(self.update_operator_display)
+        self.reportDialog.request_new_batch.connect(self.start_new_batch_after_print)
         self.mainBtn.clicked.connect(self.toggle_system)
         self.historyBtn.clicked.connect(self.open_history)
         self.reportBtn.clicked.connect(self.open_report)
@@ -614,7 +652,6 @@ class MainWindow(QMainWindow):
 
         self.load_current_batch()
         self.load_batch_counts()   # 👈 ADD THIS
-
 
     def mouseDoubleClickEvent(self, event):
         corner_size = 120
@@ -852,28 +889,48 @@ class MainWindow(QMainWindow):
             }
         """)
 
+    def update_operator_display(self, operator_id, name):
+        from create_tables import set_active_operator
+        from db_helper import update_operator
+
+        # 1. update DB identity
+        update_operator(operator_id, name)
+
+        # 2. persist active operator
+        set_active_operator(operator_id)
+
+        # 3. update runtime state
+        self.operator_id = operator_id
+        self.operator_name = name
+        self.operatorLabel.setText(f"Operator: {name}")
+
+        # 4. refresh batch context (unchanged behavior)
+        self.current_batch_id = create_tables.get_active_batch(operator_id=operator_id)
+
+        # 5. reload counts
+        self.load_batch_counts()
+
+        # 6. update UI
+        total = self.g1_count + self.g2_count + self.g3_count + self.reject_count
+        self.update_batch_label(total)
+
     def open_history(self):
         dialog = HistoryDialog(self)
         dialog.exec_()
 
     def open_report(self):
-        data = self.build_receipt_data()
+        # 🔥 Always re-sync batch + counts before report
+        self.current_batch_id = create_tables.get_active_batch(self.operator_id)
+        self.load_batch_counts()
 
-        grade_tag = f"GRADE {chr(64 + data['grade'])}" if data['grade'] <= 3 else "REJECT"
+        data = getattr(self, "receipt_data", self.build_receipt_data())
 
-        self.reportDialog.update_report_data(
-            batch=f"BATCH {data['batch_no']}",
-            recommendation=data["recommendation"],
-            grade_number=data["grade"],
-            grade_tag=grade_tag,
-            operator=getattr(self, "operator_name", "Operator 1"),
-            date_text=data["date"],
-            time_text=data["time"],
-            g1=data["g1"],
-            g2=data["g2"],
-            g3=data["g3"],
-            reject=data["reject"]
+        grade_tag = (
+            f"GRADE {chr(64 + data['grade'])}"
+            if data['grade'] <= 3 else "REJECT"
         )
+
+        self.reportDialog.set_receipt_data(data)
 
         self.reportDialog.exec_()
 
@@ -935,10 +992,12 @@ class MainWindow(QMainWindow):
             self.input_details,
             self.output_details
         )
-
-        self.ai_worker.result_ready.connect(self.handle_ai_result)
-        self.ai_worker.finished.connect(self.on_ai_finished)
-        self.ai_worker.start()
+        try:
+            self.ai_worker.result_ready.connect(self.handle_ai_result)
+            self.ai_worker.finished.connect(self.on_ai_finished)
+            self.ai_worker.start()
+        except Exception as e:
+            logging.error(f"Something went wrong: {e}", exc_info=True)
 
     def _repolish(self, widget):
         widget.style().unpolish(widget)
@@ -1008,7 +1067,7 @@ class MainWindow(QMainWindow):
         grade, note, reco = grade_map.get(label, ("UNKNOWN", "-", "-"))
         self.captured_label = grade
 
-        # === UI Update (optional: still show NON-COPRA) ===
+        # === UI Update ===
         self.gradeValue.setText(grade)
         self.colorNote.setText(note)
         self.recommendation.setText(reco)
@@ -1017,18 +1076,14 @@ class MainWindow(QMainWindow):
         if label == "NOT":
             self.stable_counter = 0
             self.last_label = None
-            return  # 💀 kill the pipeline here
+            return
 
-        # === Stability Logic (auto capture trigger) ===
-        if confidence >= self.MIN_CONFIDENCE:
-            if label == self.last_label:
-                self.stable_counter += 1
-            else:
-                self.stable_counter = 1
-                self.last_label = label
+        # === Stability Logic (NO confidence check anymore) ===
+        if label == self.last_label:
+            self.stable_counter += 1
         else:
-            self.stable_counter = 0
-            self.last_label = None
+            self.stable_counter = 1
+            self.last_label = label
 
         if self.stable_counter >= self.STABLE_REQUIRED and not self.capture_cooldown:
             self.capture_cooldown = True
@@ -1125,10 +1180,13 @@ class MainWindow(QMainWindow):
                         self.process_moisture(value, final_grade)
 
             except Exception as e:
-                print("Serial error:", e)
+                logging.error(f"Serial error: {e}", exc_info=True)
 
     def finish_capture(self, avg_moisture, moisture_grade):
         print("[SYSTEM] Finalizing capture")
+        if not getattr(self, "has_pending_capture", False):
+            print("[WARNING] No pending capture to save")
+            return
 
         # Determine final grade as the worst between AI and moisture
         ai_grade = self.captured_label
@@ -1179,15 +1237,17 @@ class MainWindow(QMainWindow):
         filepath = os.path.join(batch_folder, filename)
 
         # Save image
-        if self.captured_frame is not None:
-            cv2.imwrite(filepath, self.captured_frame)
-            print(f"[SAVED IMAGE] {filepath}")
-        else:
-            print("[INFO] No image captured (camera disabled)")
-        filepath = os.path.abspath(filepath)
+        try:
+            if self.captured_frame is not None:
+                cv2.imwrite(filepath, self.captured_frame)
+                print(f"[SAVED IMAGE] {filepath}")
+            else:
+                print("[INFO] No image captured (camera disabled)")
+            filepath = os.path.abspath(filepath)
 
-        print(f"[SAVED] {filepath} | Moisture Avg: {avg_moisture:.2f} | Final Grade: {final_grade_to_save}")
-
+            print(f"[SAVED] {filepath} | Moisture Avg: {avg_moisture:.2f} | Final Grade: {final_grade_to_save}")
+        except Exception as e:
+            logging.error(f"Something went wrong: {e}", exc_info=True)
         # Save to DB
         try:
             create_tables.save_image(
@@ -1199,7 +1259,7 @@ class MainWindow(QMainWindow):
             )
             print("[DB] Capture saved successfully.")
         except Exception as e:
-            print("[DB ERROR]", e)
+            logging.error(f"DB error: {e}", exc_info=True)
 
         # Update UI
         new_count = len(existing_images) + 1
@@ -1214,6 +1274,9 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(3000, self.reset_capture_state)
         self.moisture_done = False
         self.startBtn.setEnabled(True)
+        # Reset pending capture
+        self.captured_frame = None
+        self.has_pending_capture = False
 
     def get_recommendation(self):
         counts = {
@@ -1226,10 +1289,10 @@ class MainWindow(QMainWindow):
         dominant = max(counts, key=counts.get)
 
         mapping = {
-            "g1": "Ready for storage and selling",
-            "g2": "Store properly before selling",
-            "g3": "Needs further drying",
-            "reject": "Not suitable for sale"
+            "g1": "Ready to sell",
+            "g2": "Needs more drying for at least 20 to 30 minutes of cook time",
+            "g3": "Needs longer drying at least 40-50 minutes",
+            "reject": "Not acceptable for selling"
         }
 
         return mapping.get(dominant, "No recommendation")
@@ -1249,16 +1312,20 @@ class MainWindow(QMainWindow):
         return max(grades) if grades else 1
 
     def auto_capture(self, label, confidence):
+        print("[AUTO] Capture triggered")
+
+        # Capture ONCE here
         if self.last_frame is not None:
             self.captured_frame = self.last_frame.copy()
         else:
-            self.captured_frame = None  # 👈 allow no image
+            self.captured_frame = None
 
-        print("[AUTO] Capture triggered")
-
-        # Save frame temporarily (DO NOT SAVE YET)
+        # Store metadata
         self.captured_label = label
         self.captured_confidence = confidence
+
+        # Mark as pending
+        self.has_pending_capture = True
 
         # Pause system
         self.is_paused_for_measurement = True
@@ -1297,6 +1364,10 @@ class MainWindow(QMainWindow):
         self.moisture_samples.clear()
         self.arduino_grades.clear()
 
+        # 🔥 DROP the pending capture
+        self.captured_frame = None
+        self.has_pending_capture = False
+
         self.moisture_active = False
         self.awaiting_stable_reading = False
         self.is_paused_for_measurement = False
@@ -1306,7 +1377,6 @@ class MainWindow(QMainWindow):
         self.show_overlay("Final Moisture...", show_cancel=False, show_start=False)
         QTimer.singleShot(800, self.overlay_label.hide)
 
-        # Allow system to run again
         QTimer.singleShot(1000, self.reset_capture_state)
 
     def reset_capture_state(self):
@@ -1326,15 +1396,12 @@ class MainWindow(QMainWindow):
             return
 
         self.moisture_active = True
-        self.moisture_done = False   # 🔥 important reset
+        self.moisture_done = False
 
-        if self.last_frame is not None:
-            self.captured_frame = self.last_frame.copy()
-        else:
-            self.captured_frame = None
-
-        self.captured_label = getattr(self, "captured_label", "GRADE 1")
-        self.captured_confidence = getattr(self, "captured_confidence", 1.0)
+        # ⚠️ DO NOT recapture frame here
+        if not getattr(self, "has_pending_capture", False):
+            print("[WARNING] No pending capture found")
+            return
 
         self.is_paused_for_measurement = True
         self.awaiting_stable_reading = True
@@ -1346,49 +1413,14 @@ class MainWindow(QMainWindow):
         self.startBtn.setEnabled(False)
 
     def load_current_batch(self):
-        base_dir = "/home/aldenrecharge/Desktop/Raspberry/images"
+        # DB is authority for active batch
+        self.current_batch_id = create_tables.get_active_batch(self.operator_id)
 
-        if not os.path.exists(base_dir):
-            os.makedirs(base_dir)
-            self.current_batch_id = 1
-            self.update_batch_label(0)
-            return
+        self.load_batch_counts()
 
-        batches = [d for d in os.listdir(base_dir) if d.startswith("batch_")]
-
-        if not batches:
-            self.current_batch_id = 1
-            self.update_batch_label(0)
-            return
-
-        batches.sort(key=lambda x: int(x.split("_")[1]), reverse=True)
-
-        selected_batch = None
-        selected_count = None
-
-        for batch in batches:
-            batch_path = os.path.join(base_dir, batch)
-
-            images = [
-                f for f in os.listdir(batch_path)
-                if f.lower().endswith((".jpg", ".png"))
-            ]
-
-            if len(images) == 0:
-                selected_batch = batch
-                selected_count = 0
-                break
-
-        # If no empty batch found → create new one
-        if selected_batch is None:
-            latest_id = int(batches[0].split("_")[1])
-            self.current_batch_id = latest_id + 1
-
-            self.update_batch_label(0)
-            return
-
-        self.current_batch_id = int(selected_batch.split("_")[1])
-        self.update_batch_label(selected_count)
+        self.update_batch_label(
+            self.g1_count + self.g2_count + self.g3_count + self.reject_count
+        )
 
     def update_batch_label(self, count):
         self.batchLabel.setText(f"BATCH {self.current_batch_id}: {count} COPRA")
@@ -1459,11 +1491,11 @@ class MainWindow(QMainWindow):
     def start_new_batch_after_print(self):
         import create_tables
 
-        print("[SYSTEM] Closing current batch and starting new one")
+        print("[SYSTEM] Starting new batch after print")
 
-        self.current_batch_id = create_tables.get_or_create_batch(operator_id=1)
+        # Always resolve from DB (single authority)
+        self.current_batch_id = create_tables.get_active_batch(operator_id=self.operator_id)
 
-        # Reset counters
         self.g1_count = 0
         self.g2_count = 0
         self.g3_count = 0
@@ -1490,11 +1522,43 @@ class MainWindow(QMainWindow):
     #     self.last_frame = frame.copy()
     #     self._set_preview_from_bgr(frame)
 
+
+    def shutdown_pi(self):
+        print("[SYSTEM] Shutting down Raspberry Pi...")
+        os.system("sudo shutdown -h now")
+
+    def shutdown_pi(self):
+        print("[SYSTEM] Shutdown triggered")
+        subprocess.Popen(["sudo", "shutdown", "-h", "now"])
+
+def handle_exception(exc_type, exc_value, exc_traceback):
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+
+    logging.error("Uncaught exception", exc_info=(exc_type, exc_value, exc_traceback))
+    print("CRASH:", exc_value)
+
+
 def main():
+    logging.basicConfig(
+        filename="error.log",
+        level=logging.ERROR,
+        format="%(asctime)s - %(levelname)s - %(message)s"
+    )
+
+    sys.excepthook = handle_exception 
     app = QApplication(sys.argv)
-    create_tables.init_db()
-    w = MainWindow()
-    w.showFullScreen()
+
+    try:
+        create_tables.init_db()
+        w = MainWindow()
+        w.showFullScreen()
+    except Exception as e:
+        import traceback
+        print("INIT CRASH:")
+        traceback.print_exc()
+        return
 
     sys.exit(app.exec_())
 

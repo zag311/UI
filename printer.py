@@ -1,5 +1,5 @@
 from datetime import datetime
-
+import logging
 USB_PATH = "/dev/usb/lp0"
 
 # ESC/POS commands
@@ -10,18 +10,22 @@ def generate_receipt(data):
     now = datetime.now()
 
     lines = []
+    grade = data["grade"]
     lines.append("=" * 32)
     lines.append("   COPRA QUALITY ANALYSIS")
     lines.append("        SYSTEM RECEIPT")
     lines.append("=" * 32)
 
-    lines.append(f"Date: {data['date']}")
-    lines.append(f"Time: {data['time']}")
+    lines.append(f"Date: {data.get('date') or now.strftime('%b %d, %Y')}")
+    lines.append(f"Time: {data.get('time') or now.strftime('%I:%M %p')}")
     lines.append("-" * 32)
 
-    lines.append(f"Batch No: {data['batch_no']}")
-    lines.append(f"Final Grade: GRADE {data['grade']}" if data['grade'] <= 3 else "REJECT")
-    lines.append(f"Avg Confidence: {data['avg_confidence']}%")
+    lines.append(f"Operator: {data.get('operator', 'N/A')}")
+    lines.append(f"Batch No: {data['batch']}")
+    if isinstance(grade, int) and grade in (1, 2, 3):
+        lines.append(f"Final Grade: GRADE {grade}")
+    else:
+        lines.append("Final Grade: REJECT")
     lines.append("-" * 32)
 
     lines.append("Batch Breakdown:")
@@ -35,7 +39,7 @@ def generate_receipt(data):
     lines.append("-" * 32)
     
     lines.append(f"Recommendation:")
-    lines.append(data["recommendation"])
+    lines.append(data.get("recommendation", "N/A"))
     lines.append("-" * 32)
 
     lines.append("   Thank you!")
@@ -56,7 +60,7 @@ def print_to_usb(receipt_text):
             printer.write(CUT)
         print("[+] Printed successfully via USB")
     except Exception as e:
-        print("[-] USB print error:", e)
+        logging.error(f"Something went wrong: {e}", exc_info=True)
 
 
 def save_receipt(receipt_text, filename="receipt.txt"):

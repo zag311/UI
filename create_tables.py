@@ -39,6 +39,13 @@ def init_db():
             name TEXT NOT NULL
         )
         ''')
+
+        cursor.execute("""
+            CREATE TABLE IF NOT EXISTS AppState (
+                key TEXT PRIMARY KEY,
+                value TEXT
+            )
+        """)
         
         # Batch table
         cursor.execute('''
@@ -50,6 +57,17 @@ def init_db():
         )
         ''')
         
+        cursor.execute("""
+            PRAGMA table_info(Batch)
+        """)
+        columns = [col[1] for col in cursor.fetchall()]
+
+        if "status" not in columns:
+            try:
+                cursor.execute("ALTER TABLE Batch ADD COLUMN status TEXT DEFAULT 'ACTIVE'")
+            except sqlite3.OperationalError:
+                pass
+
         # ImageData table
         cursor.execute('''
         CREATE TABLE IF NOT EXISTS ImageData (
@@ -93,39 +111,15 @@ def init_db():
 # -----------------------------
 # BATCH LOGIC
 # -----------------------------
-def get_or_create_batch(operator_id=1):
+def create_new_batch(operator_id=1):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # Get latest batch
     cursor.execute("""
-        SELECT batch_id FROM Batch
-        ORDER BY batch_id DESC
-        LIMIT 1
-    """)
-    row = cursor.fetchone()
-
-    if row:
-        last_batch_id = row[0]
-
-        # Check if it has images
-        cursor.execute("""
-            SELECT COUNT(*) FROM ImageData
-            WHERE batch_id = ?
-        """, (last_batch_id,))
-        count = cursor.fetchone()[0]
-
-        if count == 0:
-            conn.close()
-            print("[BATCH] Reusing empty batch:", last_batch_id)
-            return last_batch_id
-
-    # Otherwise create new batch
-    cursor.execute("""
-        INSERT INTO Batch (operator_id)
-        VALUES (?)
+        INSERT INTO Batch (operator_id, status, created_at)
+        VALUES (?, 'ACTIVE', datetime('now'))
     """, (operator_id,))
-    
+
     conn.commit()
     new_id = cursor.lastrowid
     conn.close()
@@ -167,14 +161,56 @@ def create_receipt(batch_id, receipt_filename):
     
     return receipt_path
 
+def get_active_batch(operator_id=1):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT batch_id
+        FROM Batch
+        WHERE status = 'ACTIVE'
+        ORDER BY batch_id DESC
+        LIMIT 1
+    """)
+
+    row = cursor.fetchone()
+    conn.close()
+
+    if row:
+        print("[BATCH] Reusing active batch:", row[0])
+        return row[0]
+
+    return create_new_batch(operator_id)
+
+def close_batch(batch_id):
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        UPDATE Batch
+        SET status = 'CLOSED'
+        WHERE batch_id = ?
+    """, (batch_id,))
+
+    conn.commit()
+    conn.close()
+
+    print("[BATCH] Closed batch:", batch_id)
+
+def set_active_operator(operator_id):
+    import sqlite3
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    cur.execute("""
+        INSERT INTO SystemState (id, active_operator_id)
+        VALUES (1, ?)
+        ON CONFLICT(id) DO UPDATE SET active_operator_id = excluded.active_operator_id
+    """, (operator_id,))
+
+    conn.commit()
+    conn.close()
+
 # -----------------------------
 # EXAMPLE USAGE
 # -----------------------------
-if __name__ == "__main__":
-    init_db()
-    
-    batch_id, img_folder, receipt_folder = start_new_batch(operator_id=1)
-    print(f"Batch {batch_id} created. Image folder: {img_folder}, Receipt folder: {receipt_folder}")
-    
-    # Example: save_image(batch_id, image_bytes, grade='GRADE 1')
-    # Example: create_receipt(batch_id, "receipt_001.pdf")
